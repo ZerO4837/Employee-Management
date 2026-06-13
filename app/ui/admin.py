@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from app.config import BG, BLUE, BLUE_DARK, FONT, FONT_BOLD, LINE, MUTED, NAVY, SUCCESS, TEAL, TEXT, WARNING, WHITE
-from app.ui.widgets import GradientBand, GradientBanner, MetricCard, SurfaceCard, make_button, status_pill
+from app.ui.widgets import GradientBand, GradientBanner, MetricCard, SurfaceCard, make_button, show_app_alert, status_pill
 from app.utils import duration_label, today_label
 
 
@@ -14,11 +14,13 @@ class AdminPage(tk.Frame):
         super().__init__(parent, bg=BG)
         self.app = app
         self.selected_shift_id: int | None = None
+        self.announcement_category_var = tk.StringVar(value="General")
+        self.announcement_title_var = tk.StringVar()
         self._build()
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
         header = SurfaceCard(self, padx=0, pady=0, accent=False)
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 0))
@@ -60,8 +62,59 @@ class AdminPage(tk.Frame):
         self.break_time_card = MetricCard(metrics, "Break Time", "0m", TEAL, "Total recorded break duration")
         self.break_time_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
 
+        announcements = SurfaceCard(self, padx=18, pady=16, accent=True, accent_start=WARNING, accent_end=TEAL)
+        announcements.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
+        ann = announcements.body
+        ann.grid_columnconfigure(2, weight=1)
+        tk.Label(ann, text="Employee Announcements", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 15)).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 12)
+        )
+        ttk.Combobox(
+            ann,
+            values=["General", "Service Available", "Out of Stock", "Urgent", "Reminder"],
+            textvariable=self.announcement_category_var,
+            state="readonly",
+            font=(FONT, 10),
+            width=18,
+        ).grid(row=1, column=0, sticky="ew", padx=(0, 10))
+        tk.Entry(
+            ann,
+            textvariable=self.announcement_title_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+        ).grid(row=1, column=1, sticky="ew", padx=(0, 10), ipady=8)
+        self.announcement_message_text = tk.Text(
+            ann,
+            height=3,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+            wrap="word",
+        )
+        self.announcement_message_text.grid(row=1, column=2, sticky="ew", padx=(0, 10))
+        make_button(ann, "Send", self.send_announcement, "primary").grid(row=1, column=3, sticky="ew")
+        self.announcement_recent_label = tk.Label(
+            ann,
+            text="Recent announcements: none",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+            anchor="w",
+            justify="left",
+        )
+        self.announcement_recent_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+
         content = tk.Frame(self, bg=BG)
-        content.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        content.grid(row=3, column=0, sticky="nsew", padx=18, pady=(0, 18))
         content.grid_columnconfigure(0, weight=3)
         content.grid_columnconfigure(1, weight=2)
         content.grid_rowconfigure(0, weight=1)
@@ -169,6 +222,43 @@ class AdminPage(tk.Frame):
         self._refresh_metrics(shifts)
         self._refresh_shift_table(shifts)
         self._refresh_event_table(self.selected_shift_id)
+        self._refresh_announcements()
+
+    def send_announcement(self) -> None:
+        title = self.announcement_title_var.get().strip()
+        message = self.announcement_message_text.get("1.0", tk.END).strip()
+        if not title:
+            show_app_alert(self, "Missing title", "Please add an announcement title before sending.", "warning")
+            return
+        if not message:
+            show_app_alert(self, "Missing message", "Please add a short message for the employee.", "warning")
+            return
+        self.app.attendance_store.create_announcement(
+            self.announcement_category_var.get(),
+            title,
+            message,
+            self.app.display_user,
+        )
+        self.announcement_title_var.set("")
+        self.announcement_message_text.delete("1.0", tk.END)
+        self.refresh_all()
+        show_app_alert(
+            self,
+            "Notification has been sent",
+            "The employee can now see it in the notification dropdown.",
+            "success",
+        )
+
+    def _refresh_announcements(self) -> None:
+        announcements = self.app.attendance_store.list_announcements(limit=3)
+        if not announcements:
+            self.announcement_recent_label.configure(text="Recent announcements: none")
+            return
+        parts = []
+        for announcement in announcements:
+            created = self._format_time(announcement["created_at"])
+            parts.append(f"{created} - {announcement['category']}: {announcement['title']}")
+        self.announcement_recent_label.configure(text="Recent announcements: " + "  |  ".join(parts))
 
     def _refresh_metrics(self, shifts: list[dict]) -> None:
         active_count = sum(1 for shift in shifts if shift["status"] == "active")

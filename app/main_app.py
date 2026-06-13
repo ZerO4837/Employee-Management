@@ -37,6 +37,7 @@ class EmployeeApp(tk.Tk):
         self._configure_style()
         self._set_window_icon()
         self._build_pages()
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.show_page("login")
 
     def _configure_style(self) -> None:
@@ -92,20 +93,28 @@ class EmployeeApp(tk.Tk):
             self.pages[name].refresh_all()
 
     def login(self, username: str, password: str) -> None:
-        from tkinter import messagebox
-
         user = self.auth.verify(username, password)
         if user:
+            login_page = self.pages.get("login")
+            if hasattr(login_page, "clear_login_error"):
+                login_page.clear_login_error()
             self.current_user = user["username"]
             self.current_role = user["role"]
             self.show_page("admin" if self.current_role == "admin" else "dashboard")
             return
-        messagebox.showerror("Login failed", "Username or password is incorrect.")
+        login_page = self.pages.get("login")
+        if hasattr(login_page, "show_login_error"):
+            login_page.show_login_error("Username or password is incorrect. Please check the details and try again.")
 
     def logout(self) -> None:
         self.current_user = ""
         self.current_role = ""
         self.show_page("login")
+
+    def close_app(self) -> None:
+        self.current_user = ""
+        self.current_role = ""
+        self.destroy()
 
     @property
     def display_user(self) -> str:

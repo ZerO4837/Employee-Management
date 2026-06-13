@@ -80,6 +80,11 @@ class DashboardPage(tk.Frame):
         self.close_first_shift_buttons: list[tk.Button] = []
         self.shift_required_buttons: list[tk.Button] = []
         self.sales_input_widgets: list[tk.Widget] = []
+        self.notification_button: tk.Button | None = None
+        self.notification_badge: tk.Label | None = None
+        self.notification_dropdown: NotificationDropdown | None = None
+        self.notification_frame: tk.Frame | None = None
+        self.shell: tk.Frame | None = None
         self._build()
         self._tick_clock()
 
@@ -173,9 +178,11 @@ class DashboardPage(tk.Frame):
         make_button(sidebar, "Logout", self.app.logout, "sidebar_active").pack(fill="x")
 
         shell = tk.Frame(self, bg=BG)
+        self.shell = shell
         shell.grid(row=0, column=1, sticky="nsew")
         shell.grid_rowconfigure(1, weight=1)
         shell.grid_columnconfigure(0, weight=1)
+        shell.bind("<Configure>", self._on_shell_configure)
 
         topbar = SurfaceCard(shell, padx=28, pady=18, accent=True, accent_start=BLUE, accent_end=TEAL)
         topbar.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 0))
@@ -186,13 +193,35 @@ class DashboardPage(tk.Frame):
         )
         self.user_label = tk.Label(top, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
         self.user_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        self.notification_frame = tk.Frame(top, bg=WHITE)
+        self.notification_frame.grid(row=0, column=1, rowspan=2, sticky="e", padx=(0, 12))
+        self.notification_button = make_button(
+            self.notification_frame,
+            "Notifications",
+            self.toggle_notifications,
+            "light",
+        )
+        self.notification_button.pack(side="left")
+        self.notification_badge = tk.Label(
+            self.notification_frame,
+            text="",
+            bg=WARNING,
+            fg=WHITE,
+            font=(FONT_BOLD, 8),
+            padx=7,
+            pady=2,
+        )
+        self.notification_badge.pack(side="left", padx=(6, 0))
+
         self.clock_label = tk.Label(top, text="", bg="#eef6ff", fg=NAVY, font=(FONT_BOLD, 11), padx=14, pady=7)
-        self.clock_label.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.clock_label.grid(row=0, column=2, rowspan=2, sticky="e")
 
         self.content = tk.Frame(shell, bg=BG, padx=18, pady=18)
         self.content.grid(row=1, column=0, sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
+        self.notification_dropdown = NotificationDropdown(shell, self)
 
         self.views["overview"] = self._build_overview_view()
         self.views["attendance"] = self._build_attendance_view()
@@ -554,6 +583,20 @@ class DashboardPage(tk.Frame):
     def _employee_username(self) -> str:
         return self.app.display_user
 
+    def _sales_date(self) -> str:
+        return self.current_day_date or datetime.now().strftime("%Y-%m-%d")
+
+    def _refresh_sales_entries_from_store(self) -> None:
+        entries = self.app.attendance_store.list_sales_entries(self._employee_username(), self._sales_date())
+        normalized = []
+        for entry in entries:
+            item = dict(entry)
+            item["id"] = str(item["id"])
+            item["date"] = item.pop("entry_date")
+            item["time"] = item.pop("entry_time")
+            normalized.append(item)
+        self.sales_entries = normalized
+
     def _sync_attendance_state(self) -> None:
         active_day = self.app.attendance_store.get_active_day(self._employee_username())
         self.current_day_id = int(active_day["id"]) if active_day else None
@@ -668,6 +711,7 @@ class DashboardPage(tk.Frame):
 
     def refresh_all(self) -> None:
         self._sync_attendance_state()
+        self._refresh_sales_entries_from_store()
         self.user_label.configure(text=f"Signed in as {self.app.display_user}")
         self.welcome_banner.set_text(
             f"Welcome, {self.app.display_user}",
@@ -677,6 +721,7 @@ class DashboardPage(tk.Frame):
         self._refresh_attendance_log()
         self._refresh_today_table()
         self._refresh_recent_activity()
+        self._refresh_notification_badge()
 
     def _tick_clock(self) -> None:
         self.clock_label.configure(text=f"{today_label()}  |  {now_label()}")
@@ -773,6 +818,53 @@ class DashboardPage(tk.Frame):
             return
         for item in items[-8:][::-1]:
             self.recent_list.insert(tk.END, item)
+
+    def _refresh_notification_badge(self) -> None:
+        if self.notification_badge is None:
+            return
+        unread_count = self.app.attendance_store.unread_announcement_count(self._employee_username())
+        if unread_count:
+            self.notification_badge.configure(text=str(unread_count))
+            self.notification_badge.pack(side="left", padx=(6, 0))
+            return
+        self.notification_badge.configure(text="")
+        self.notification_badge.pack_forget()
+
+    def _on_shell_configure(self, _event: tk.Event | None = None) -> None:
+        if self.notification_dropdown is not None and self.notification_dropdown.winfo_ismapped():
+            self._place_notification_dropdown()
+
+    def _place_notification_dropdown(self) -> None:
+        if self.shell is None or self.notification_frame is None or self.notification_dropdown is None:
+            return
+        self.shell.update_idletasks()
+        self.notification_frame.update_idletasks()
+        dropdown_width = min(460, max(360, self.shell.winfo_width() - 48))
+        frame_right = self.notification_frame.winfo_rootx() + self.notification_frame.winfo_width()
+        shell_left = self.shell.winfo_rootx()
+        x_position = min(frame_right - shell_left, self.shell.winfo_width() - 20)
+        y_position = self.notification_frame.winfo_rooty() - self.shell.winfo_rooty() + self.notification_frame.winfo_height() + 10
+        dropdown_height = min(430, max(300, self.shell.winfo_height() - y_position - 24))
+        self.notification_dropdown.place(
+            x=x_position,
+            y=y_position,
+            anchor="ne",
+            width=dropdown_width,
+            height=dropdown_height,
+        )
+        self.notification_dropdown.lift()
+
+    def toggle_notifications(self) -> None:
+        if self.notification_dropdown is None:
+            return
+        if self.notification_dropdown.winfo_ismapped():
+            self.notification_dropdown.hide()
+            return
+        self.notification_dropdown.refresh()
+        self._place_notification_dropdown()
+
+    def open_notifications(self) -> None:
+        self.toggle_notifications()
 
     def current_break_seconds(self) -> int:
         total = self.total_break_seconds
@@ -916,12 +1008,10 @@ class DashboardPage(tk.Frame):
                 messagebox.showerror("Invalid amount", "Sale Amount must be a number.")
                 return
 
-        entry["id"] = str(self.next_sales_id)
-        entry["date"] = datetime.now().strftime("%Y-%m-%d")
+        entry["date"] = self._sales_date()
         entry["time"] = now_label()
-        self.next_sales_id += 1
-        self.sales_entries.append(entry)
-        self.last_saved_label.configure(text=f"#{entry['id']} {entry['item']} saved at {entry['time']}")
+        saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
+        self.last_saved_label.configure(text=f"#{saved['id']} {entry['item']} saved at {entry['time']}")
         self.clear_sales_form()
         self.refresh_all()
         messagebox.showinfo("Entry saved", "Sold item entry saved for today.")
@@ -954,7 +1044,7 @@ class DashboardPage(tk.Frame):
             return
         if not messagebox.askyesno("Remove entry", f"Remove entry #{entry['id']} from today's data?"):
             return
-        self.sales_entries = [item for item in self.sales_entries if item["id"] != entry["id"]]
+        self.app.attendance_store.delete_sales_entry(int(entry["id"]), self._employee_username())
         self.refresh_all()
 
 
@@ -1050,7 +1140,228 @@ class EditEntryWindow(tk.Toplevel):
             except ValueError:
                 messagebox.showerror("Invalid amount", "Sale Amount must be a number.")
                 return
+        self.dashboard.app.attendance_store.update_sales_entry(
+            int(self.entry["id"]),
+            self.dashboard._employee_username(),
+            updates,
+        )
         self.entry.update(updates)
         self.dashboard.last_saved_label.configure(text=f"#{self.entry['id']} updated at {now_label()}")
         self.dashboard.refresh_all()
         self.destroy()
+
+
+class NotificationDropdown(tk.Frame):
+    def __init__(self, parent: tk.Misc, dashboard: DashboardPage) -> None:
+        super().__init__(
+            parent,
+            bg=WHITE,
+            highlightbackground="#c7d8ee",
+            highlightthickness=1,
+            bd=0,
+        )
+        self.dashboard = dashboard
+        self.announcements: list[dict] = []
+        self._build()
+
+    def _build(self) -> None:
+        GradientBand(self, start=WARNING, end=TEAL, height=4).pack(fill="x")
+        body = tk.Frame(self, bg=WHITE, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(2, weight=1)
+
+        header = tk.Frame(body, bg=WHITE)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text="Notifications", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(row=0, column=0, sticky="w")
+        self.summary_label = tk.Label(header, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
+        self.summary_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        actions = tk.Frame(header, bg=WHITE)
+        actions.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.mark_read_button = make_button(actions, "Mark All Read", self.mark_all_read, "light")
+        self.mark_read_button.pack(side="left", padx=(0, 8))
+        tk.Button(
+            actions,
+            text="X",
+            command=self.hide,
+            bg=WHITE,
+            fg=MUTED,
+            activebackground="#eff5ff",
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(FONT_BOLD, 10),
+            padx=8,
+            pady=5,
+            highlightthickness=0,
+        ).pack(side="left")
+
+        tk.Frame(body, bg=LINE, height=1).grid(row=1, column=0, sticky="ew", pady=14)
+
+        self.scroll_canvas = tk.Canvas(
+            body,
+            bg="#fbfdff",
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        self.scroll_canvas.grid(row=2, column=0, sticky="nsew")
+        self.scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.scroll_canvas.yview)
+        self.scrollbar.grid(row=2, column=1, sticky="ns")
+        self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.notification_container = tk.Frame(self.scroll_canvas, bg="#fbfdff", padx=12, pady=12)
+        self.notification_window = self.scroll_canvas.create_window(
+            (0, 0),
+            window=self.notification_container,
+            anchor="nw",
+        )
+        self.notification_container.bind("<Configure>", self._on_notifications_configure)
+        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
+        self.scroll_canvas.bind("<Enter>", self._bind_mousewheel)
+        self.scroll_canvas.bind("<Leave>", self._unbind_mousewheel)
+
+        footer = tk.Label(
+            body,
+            text="Visible for 3 days from the time they are sent.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+        )
+        footer.grid(row=3, column=0, sticky="w", pady=(12, 0))
+
+    def refresh(self) -> None:
+        self.announcements = self.dashboard.app.attendance_store.list_employee_announcements(
+            self.dashboard._employee_username(),
+            limit=20,
+        )
+        unread = sum(1 for item in self.announcements if not item["is_read"])
+        self.summary_label.configure(text=f"{unread} unread | {len(self.announcements)} active")
+        set_button_enabled(self.mark_read_button, bool(self.announcements))
+        for child in self.notification_container.winfo_children():
+            child.destroy()
+        if not self.announcements:
+            empty = tk.Label(
+                self.notification_container,
+                text="No active notifications.",
+                bg="#fbfdff",
+                fg=MUTED,
+                font=(FONT, 10),
+            )
+            empty.pack(anchor="w", pady=10)
+            self.scroll_canvas.yview_moveto(0)
+            return
+        for announcement in self.announcements:
+            self._add_notification_bubble(announcement)
+        self._on_notifications_configure()
+        self.scroll_canvas.yview_moveto(0)
+
+    def _add_notification_bubble(self, announcement: dict) -> None:
+        unread = not announcement["is_read"]
+        bubble_bg = "#eef6ff" if unread else WHITE
+        border = BLUE if unread else LINE
+        bubble = tk.Frame(
+            self.notification_container,
+            bg=bubble_bg,
+            padx=14,
+            pady=12,
+            highlightbackground=border,
+            highlightthickness=1,
+        )
+        bubble.pack(fill="x", pady=(0, 10))
+        bubble.grid_columnconfigure(0, weight=1)
+
+        meta = tk.Frame(bubble, bg=bubble_bg)
+        meta.grid(row=0, column=0, sticky="ew")
+        meta.grid_columnconfigure(2, weight=1)
+
+        status_dot = tk.Canvas(meta, width=12, height=12, bg=bubble_bg, bd=0, highlightthickness=0)
+        dot_color = BLUE if unread else "#b8c7dc"
+        status_dot.create_oval(2, 2, 10, 10, fill=dot_color, outline="")
+        status_dot.grid(row=0, column=0, sticky="w", padx=(0, 7))
+
+        category = tk.Label(
+            meta,
+            text=announcement["category"],
+            bg=BLUE if unread else "#eaf2ff",
+            fg=WHITE if unread else BLUE,
+            font=(FONT_BOLD, 8),
+            padx=9,
+            pady=3,
+        )
+        category.grid(row=0, column=1, sticky="w")
+
+        created = self.dashboard._format_event_time(announcement["created_at"])
+        status = "Unread" if unread else "Read"
+        tk.Label(
+            meta,
+            text=f"{status} | {created}",
+            bg=bubble_bg,
+            fg=MUTED,
+            font=(FONT, 8),
+        ).grid(row=0, column=2, sticky="e")
+
+        tk.Label(
+            bubble,
+            text=announcement["title"],
+            bg=bubble_bg,
+            fg=TEXT,
+            font=(FONT_BOLD, 12),
+            wraplength=360,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 4))
+
+        tk.Label(
+            bubble,
+            text=announcement["message"],
+            bg=bubble_bg,
+            fg=TEXT,
+            font=(FONT, 10),
+            wraplength=370,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w")
+
+    def _on_notifications_configure(self, _event: tk.Event | None = None) -> None:
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all") or (0, 0, 0, 0))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.scroll_canvas.itemconfigure(self.notification_window, width=max(event.width - 4, 1))
+        self._on_notifications_configure()
+
+    def _bind_mousewheel(self, _event: tk.Event) -> None:
+        self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event: tk.Event | None = None) -> None:
+        self.scroll_canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event: tk.Event) -> str:
+        bbox = self.scroll_canvas.bbox("all")
+        if bbox is None:
+            self.scroll_canvas.yview_moveto(0)
+            return "break"
+        content_height = bbox[3] - bbox[1]
+        visible_height = max(self.scroll_canvas.winfo_height(), 1)
+        if content_height <= visible_height:
+            self.scroll_canvas.yview_moveto(0)
+            return "break"
+        top, bottom = self.scroll_canvas.yview()
+        direction = -1 if event.delta > 0 else 1
+        if direction < 0 and top <= 0:
+            self.scroll_canvas.yview_moveto(0)
+            return "break"
+        if direction > 0 and bottom >= 1:
+            self.scroll_canvas.yview_moveto(max(0, 1 - (visible_height / content_height)))
+            return "break"
+        self.scroll_canvas.yview_scroll(direction, "units")
+        return "break"
+
+    def hide(self) -> None:
+        self._unbind_mousewheel()
+        self.place_forget()
+
+    def mark_all_read(self) -> None:
+        ids = [int(item["id"]) for item in self.announcements]
+        self.dashboard.app.attendance_store.mark_announcements_read(self.dashboard._employee_username(), ids)
+        self.refresh()
+        self.dashboard._refresh_notification_badge()

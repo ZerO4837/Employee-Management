@@ -8,6 +8,7 @@ from app.config import (
     BLUE_DARK,
     BUSINESS_NAME,
     CYAN,
+    DANGER,
     DEFAULT_USERNAME,
     FONT,
     FONT_BOLD,
@@ -182,6 +183,8 @@ class LoginPage(tk.Frame):
         self.username_var = tk.StringVar(value=DEFAULT_USERNAME)
         self.password_var = tk.StringVar()
         self.show_password_var = tk.BooleanVar(value=False)
+        self.error_panel: tk.Frame | None = None
+        self.error_message_label: tk.Label | None = None
         self._build()
 
     def _build(self) -> None:
@@ -206,8 +209,37 @@ class LoginPage(tk.Frame):
             row=1, column=0, sticky="w", pady=(7, 28)
         )
 
-        self.username_entry = self._entry(body, "Username", self.username_var, 2)
-        self.password_entry = self._entry(body, "Password", self.password_var, 4, show="*")
+        self.error_panel = tk.Frame(
+            body,
+            bg="#fff3f4",
+            padx=14,
+            pady=12,
+            highlightbackground="#f0c3ca",
+            highlightthickness=1,
+        )
+        self.error_panel.grid(row=2, column=0, sticky="ew", pady=(0, 18))
+        self.error_panel.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            self.error_panel,
+            text="LOGIN ERROR",
+            bg="#fff3f4",
+            fg=DANGER,
+            font=(FONT_BOLD, 8),
+        ).grid(row=0, column=0, sticky="w")
+        self.error_message_label = tk.Label(
+            self.error_panel,
+            text="",
+            bg="#fff3f4",
+            fg=TEXT,
+            font=(FONT, 10),
+            justify="left",
+            wraplength=420,
+        )
+        self.error_message_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.error_panel.grid_remove()
+
+        self.username_entry = self._entry(body, "Username", self.username_var, 3)
+        self.password_entry = self._entry(body, "Password", self.password_var, 5, show="*")
         self.username_entry.focus_set()
 
         tk.Checkbutton(
@@ -219,9 +251,9 @@ class LoginPage(tk.Frame):
             fg=MUTED,
             activebackground=WHITE,
             font=(FONT, 10),
-        ).grid(row=6, column=0, sticky="w", pady=(0, 18))
+        ).grid(row=7, column=0, sticky="w", pady=(0, 18))
 
-        make_button(body, "Sign In", self._submit_login, "primary").grid(row=7, column=0, sticky="ew", pady=(2, 12))
+        make_button(body, "Sign In", self._submit_login, "primary").grid(row=8, column=0, sticky="ew", pady=(2, 12))
 
         forgot = tk.Button(
             body,
@@ -236,7 +268,7 @@ class LoginPage(tk.Frame):
             cursor="hand2",
             font=(FONT_BOLD, 10),
         )
-        forgot.grid(row=8, column=0, sticky="w")
+        forgot.grid(row=9, column=0, sticky="w")
 
         self.password_entry.bind("<Return>", lambda _event: self._submit_login())
         self.username_entry.bind("<Return>", lambda _event: self.password_entry.focus_set())
@@ -258,5 +290,18 @@ class LoginPage(tk.Frame):
     def _toggle_password(self) -> None:
         self.password_entry.configure(show="" if self.show_password_var.get() else "*")
 
+    def show_login_error(self, message: str) -> None:
+        if self.error_panel is None or self.error_message_label is None:
+            return
+        self.error_message_label.configure(text=message)
+        self.error_panel.grid()
+        self.password_entry.focus_set()
+        self.password_entry.selection_range(0, tk.END)
+
+    def clear_login_error(self) -> None:
+        if self.error_panel is not None:
+            self.error_panel.grid_remove()
+
     def _submit_login(self) -> None:
+        self.clear_login_error()
         self.app.login(self.username_var.get(), self.password_var.get())

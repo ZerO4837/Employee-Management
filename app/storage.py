@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
@@ -15,6 +15,10 @@ def _iso(value: datetime | None = None) -> str:
 
 def _today() -> str:
     return _now().strftime("%Y-%m-%d")
+
+
+def _announcement_cutoff() -> str:
+    return (_now() - timedelta(days=3)).isoformat(timespec="microseconds")
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
@@ -98,6 +102,52 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS announcements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS announcement_reads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    announcement_id INTEGER NOT NULL,
+                    employee_username TEXT NOT NULL,
+                    read_at TEXT NOT NULL,
+                    UNIQUE (announcement_id, employee_username),
+                    FOREIGN KEY (announcement_id) REFERENCES announcements (id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sales_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_username TEXT NOT NULL,
+                    entry_date TEXT NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    customer TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL DEFAULT '',
+                    order_id TEXT NOT NULL DEFAULT '',
+                    item TEXT NOT NULL DEFAULT '',
+                    quantity TEXT NOT NULL DEFAULT '',
+                    amount TEXT NOT NULL DEFAULT '',
+                    payment TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_attendance_shift_lookup
                 ON attendance_shifts (employee_username, shift_date, status)
                 """
@@ -118,6 +168,24 @@ class AttendanceStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_attendance_day_events
                 ON attendance_day_events (day_id, event_time)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_announcements_active
+                ON announcements (is_active, created_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_announcement_reads_lookup
+                ON announcement_reads (employee_username, announcement_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sales_entries_lookup
+                ON sales_entries (employee_username, entry_date)
                 """
             )
 
@@ -458,3 +526,198 @@ class AttendanceStore:
         events = [dict(row) for row in shift_rows] + [dict(row) for row in day_rows]
         events.sort(key=lambda item: (item["event_time"], int(item["id"])))
         return events[:limit]
+
+    def create_announcement(self, category: str, title: str, message: str, created_by: str) -> dict:
+        created_at = _iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO announcements
+                (category, title, message, created_by, created_at, is_active)
+                VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (category.strip(), title.strip(), message.strip(), created_by, created_at),
+            )
+            row = connection.execute("SELECT * FROM announcements WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Failed to create announcement.")
+        return created
+
+    def list_announcements(self, limit: int = 50, active_only: bool = False) -> list[dict]:
+        cutoff = _announcement_cutoff()
+        with self.connect() as connection:
+            if active_only:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM announcements
+                    WHERE is_active = 1 AND created_at >= ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (cutoff, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM announcements
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (cutoff, limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_active_announcements(self, limit: int = 10) -> list[dict]:
+        return self.list_announcements(limit=limit, active_only=True)
+
+    def list_employee_announcements(self, employee_username: str, limit: int = 20) -> list[dict]:
+        cutoff = _announcement_cutoff()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    a.*,
+                    CASE WHEN r.id IS NULL THEN 0 ELSE 1 END AS is_read
+                FROM announcements a
+                LEFT JOIN announcement_reads r
+                    ON r.announcement_id = a.id
+                    AND r.employee_username = ?
+                WHERE a.is_active = 1
+                    AND a.created_at >= ?
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT ?
+                """,
+                (employee_username, cutoff, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unread_announcement_count(self, employee_username: str) -> int:
+        cutoff = _announcement_cutoff()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS unread_count
+                FROM announcements a
+                LEFT JOIN announcement_reads r
+                    ON r.announcement_id = a.id
+                    AND r.employee_username = ?
+                WHERE a.is_active = 1
+                    AND a.created_at >= ?
+                    AND r.id IS NULL
+                """,
+                (employee_username, cutoff),
+            ).fetchone()
+        return int(row["unread_count"])
+
+    def mark_announcements_read(self, employee_username: str, announcement_ids: list[int]) -> None:
+        if not announcement_ids:
+            return
+        read_at = _iso()
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO announcement_reads
+                (announcement_id, employee_username, read_at)
+                VALUES (?, ?, ?)
+                """,
+                [(announcement_id, employee_username, read_at) for announcement_id in announcement_ids],
+            )
+
+    def list_sales_entries(self, employee_username: str, entry_date: str | None = None) -> list[dict]:
+        entry_date = entry_date or _today()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM sales_entries
+                WHERE employee_username = ? AND entry_date = ?
+                ORDER BY id ASC
+                """,
+                (employee_username, entry_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_sales_entry(self, employee_username: str, entry_date: str, entry: dict[str, str]) -> dict:
+        created_at = _iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO sales_entries
+                (
+                    employee_username, entry_date, entry_time, customer, platform, order_id,
+                    item, quantity, amount, payment, status, notes, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    employee_username,
+                    entry_date,
+                    entry.get("time", ""),
+                    entry.get("customer", ""),
+                    entry.get("platform", ""),
+                    entry.get("order_id", ""),
+                    entry.get("item", ""),
+                    entry.get("quantity", ""),
+                    entry.get("amount", ""),
+                    entry.get("payment", ""),
+                    entry.get("status", ""),
+                    entry.get("notes", ""),
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = connection.execute("SELECT * FROM sales_entries WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Failed to create sales entry.")
+        return created
+
+    def update_sales_entry(self, entry_id: int, employee_username: str, updates: dict[str, str]) -> dict:
+        updated_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET customer = ?,
+                    platform = ?,
+                    order_id = ?,
+                    item = ?,
+                    quantity = ?,
+                    amount = ?,
+                    payment = ?,
+                    status = ?,
+                    notes = ?,
+                    updated_at = ?
+                WHERE id = ? AND employee_username = ?
+                """,
+                (
+                    updates.get("customer", ""),
+                    updates.get("platform", ""),
+                    updates.get("order_id", ""),
+                    updates.get("item", ""),
+                    updates.get("quantity", ""),
+                    updates.get("amount", ""),
+                    updates.get("payment", ""),
+                    updates.get("status", ""),
+                    updates.get("notes", ""),
+                    updated_at,
+                    entry_id,
+                    employee_username,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM sales_entries WHERE id = ? AND employee_username = ?",
+                (entry_id, employee_username),
+            ).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise ValueError("Sales entry could not be found.")
+        return updated
+
+    def delete_sales_entry(self, entry_id: int, employee_username: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM sales_entries WHERE id = ? AND employee_username = ?",
+                (entry_id, employee_username),
+            )

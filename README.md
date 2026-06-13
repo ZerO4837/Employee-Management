@@ -35,12 +35,15 @@ This first version builds a polished, modular UI and local screen flow:
 
 - Login and password reset
 - Separate admin panel login
+- Auto logout on app close
 - Attendance day start / end
 - Attendance check in / check out
 - First-shift close and second/night-shift tracking on the same day
 - Break start / end
 - Admin attendance sheet with shift summaries and event timeline
+- Admin-to-employee announcements
 - Sold item entry form
+- Local saved sales entries so accidental close does not wipe today's work
 - Today-only entries table
 - Edit and remove today's entries
 
@@ -73,6 +76,32 @@ Start Day -> Check In -> Close First Shift -> Check In -> Check Out -> End Day
 ```
 
 The night shift stays attached to the same attendance day until `End Day` is clicked.
+
+## Close And Reopen Behavior
+
+If the app is closed by mistake, the in-memory login session is cleared. Reopening the app always starts at the login screen.
+
+Saved local work is restored after login:
+
+- Active attendance day
+- Active shift/check-in state
+- Break state
+- Today's sold item entries
+- Employee announcements
+
+## Announcements
+
+The admin panel can send announcements to the employee dashboard. Use this for service availability, out-of-stock notices, urgent reminders, or general updates.
+
+Employee notifications appear in the header notification control:
+
+- Unread announcements show a count badge.
+- Clicking notifications opens a bubble-style dropdown inside the employee dashboard.
+- Marking notifications as read clears the badge.
+- Announcements stay visible for 3 days, then disappear automatically.
+- The admin send action uses a branded in-app alert instead of a native Windows popup.
+
+For now, announcements are saved locally in SQLite. When Supabase is connected later, this same feature can sync between your PC and the employee PC.
 
 ## Owner App / Employee App Direction
 

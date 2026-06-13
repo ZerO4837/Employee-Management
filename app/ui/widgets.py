@@ -289,6 +289,91 @@ def set_button_enabled(button: tk.Button, enabled: bool) -> None:
     )
 
 
+def show_app_alert(
+    parent: tk.Misc,
+    title: str,
+    message: str,
+    kind: str = "success",
+    duration_ms: int | None = 3600,
+) -> tk.Frame:
+    palettes = {
+        "success": (SUCCESS, TEAL, "#eafaf4", "SENT"),
+        "warning": (WARNING, "#e5a322", "#fff6e8", "CHECK"),
+        "danger": (DANGER, "#e05a66", "#fff1f3", "ERROR"),
+        "info": (BLUE, TEAL, "#eef6ff", "INFO"),
+    }
+    accent, accent_end, soft_bg, label = palettes.get(kind, palettes["info"])
+
+    for child in parent.winfo_children():
+        if getattr(child, "is_app_alert", False):
+            child.destroy()
+
+    alert = tk.Frame(
+        parent,
+        bg=WHITE,
+        highlightbackground=blend(accent, LINE, 0.45),
+        highlightthickness=1,
+        bd=0,
+    )
+    alert.is_app_alert = True  # type: ignore[attr-defined]
+
+    def dismiss() -> None:
+        if alert.winfo_exists():
+            alert.destroy()
+
+    GradientBand(alert, start=accent, end=accent_end, height=4).pack(fill="x")
+    body = tk.Frame(alert, bg=WHITE, padx=16, pady=14)
+    body.pack(fill="both", expand=True)
+    body.grid_columnconfigure(1, weight=1)
+
+    badge = tk.Label(
+        body,
+        text=label,
+        bg=soft_bg,
+        fg=accent,
+        font=(FONT_BOLD, 8),
+        padx=10,
+        pady=4,
+    )
+    badge.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
+
+    tk.Label(body, text=title, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 13)).grid(row=0, column=1, sticky="w")
+    tk.Label(
+        body,
+        text=message,
+        bg=WHITE,
+        fg=MUTED,
+        font=(FONT, 10),
+        justify="left",
+        wraplength=310,
+    ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+    tk.Button(
+        body,
+        text="X",
+        command=dismiss,
+        bg=WHITE,
+        fg=MUTED,
+        activebackground="#eff5ff",
+        activeforeground=TEXT,
+        relief="flat",
+        bd=0,
+        cursor="hand2",
+        font=(FONT_BOLD, 9),
+        padx=8,
+        pady=3,
+        highlightthickness=0,
+    ).grid(row=0, column=2, sticky="ne", padx=(12, 0))
+
+    parent.update_idletasks()
+    parent_width = max(parent.winfo_width(), 392)
+    alert_width = min(460, max(360, parent_width - 48))
+    alert.place(relx=1.0, x=-24, y=24, anchor="ne", width=alert_width)
+    alert.lift()
+    if duration_ms:
+        alert.after(duration_ms, dismiss)
+    return alert
+
+
 def field_label(parent: tk.Misc, text: str) -> tk.Label:
     return tk.Label(parent, text=text, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10))
 
