@@ -1,6 +1,6 @@
 # Digital Service Pakistan Employee App
 
-Python desktop app prototype for employee attendance, break tracking, sold item entry, and today-only record review.
+Python desktop app prototype for employee attendance, break tracking, sold item entry, local 5-day sales review, and Excel workbook row sync.
 
 ## Run Locally
 
@@ -42,12 +42,70 @@ This first version builds a polished, modular UI and local screen flow:
 - Break start / end
 - Admin attendance sheet with shift summaries and event timeline
 - Admin-to-employee announcements
-- Sold item entry form
-- Local saved sales entries so accidental close does not wipe today's work
-- Today-only entries table
-- Edit and remove today's entries
+- Admin sales workbook target settings
+- Sold item entry form matching the owner workbook columns
+- Numeric-only buying and selling amount fields
+- Auto-filled, read-only sales date field
+- `Other` status reason field that saves the typed reason as the final status
+- Local saved sales entries for the last 5 calendar days so accidental close does not wipe recent work
+- Excel sales row sync for the mapped owner workbook columns
+- Employee-facing sales numbering resets every day (`#1`, `#2`, etc. per date)
+- 5-day day-card selector with a focused entries table for the selected date
+- Edit recent entries without employee delete access
 
-The Excel writing layer is intentionally not connected yet. The next step is to map your real Excel columns and wire entries into the workbook without exposing the full sheet to the employee.
+## Sales Excel Sync
+
+The sold item form now matches the owner workbook columns:
+
+```text
+A Customer Name
+B Items Sold
+C Email/Order ID
+D Buying Amount
+E Selling Amount
+F Profit (=Erow-Drow)
+G Status
+H Date (auto-filled as day/month/year)
+```
+
+If Status is set to `Other`, the app opens an extra reason field and writes that reason into column G.
+
+New entries are saved locally first, then copied into the workbook. By default, source runs write to:
+
+```text
+data/sales_entries.xlsx
+```
+
+Employee-facing entry numbers are display numbers only. They reset every date, so if yesterday has `#1` and `#2`, today's first sale shows as `#1`. The hidden database ID is still kept internally so editing and Excel sync can safely update the correct record.
+
+The employee app keeps a rolling 5-day local sales view:
+
+- The Sold Item Entry page shows today's count only.
+- The 5-Day Data page shows one clickable date card for each of the last 5 calendar days.
+- Clicking a date card opens only that date's entries in the table.
+- Synced local entries older than the 5-day window are removed from the local view/database.
+- Unsynced old entries are kept locally to avoid losing sales if Excel sync failed.
+- Excel remains the main permanent sales record.
+
+To connect your real OneDrive workbook, set this environment variable before starting the app:
+
+```powershell
+$env:DSP_SALES_WORKBOOK_PATH="C:\Users\YOUR_USER\OneDrive\Path\To\YourWorkbook.xlsx"
+python main.py
+```
+
+Optional: set `DSP_SALES_WORKSHEET_NAME` if the data should go to a specific worksheet. If it is empty, the first active sheet is used.
+
+The admin panel can also change the active workbook without editing code:
+
+1. Log in with the admin account.
+2. Use `Browse` to select an existing `.xlsx` or `.xlsm` workbook path, or use `Upload Workbook` to copy a workbook into the app data folder.
+3. Optionally enter a worksheet name.
+4. Click `Save Target`.
+
+Do not paste a OneDrive browser sharing URL into the workbook field. `https://1drv.ms/...` links open a web page; they are not writable workbook file paths for `openpyxl`.
+
+The employee only sees the app UI. If the employee PC has no OneDrive login and no workbook file access, direct Excel writing from that employee PC cannot reach your private OneDrive workbook by itself. For strict no-workbook-access with two separate PCs, use a shared database/API queue where the employee app submits sales and the owner/admin side writes them into Excel using your credentials or your local OneDrive sync.
 
 ## Project Structure
 
@@ -55,14 +113,15 @@ The Excel writing layer is intentionally not connected yet. The next step is to 
 main.py                 App launcher
 app/config.py           Business settings, paths, colors, and form field definitions
 app/auth.py             Login and password reset storage
-app/storage.py          SQLite attendance shift and event storage
+app/storage.py          SQLite attendance, announcements, sales, and app settings storage
+app/excel_sales.py      Excel workbook row writer for sold item entries
 app/utils.py            Date, money, and duration formatting helpers
 app/main_app.py         Main Tkinter window and page routing
 app/ui/widgets.py       Shared high-fi widgets, gradient elements, cards, buttons
 app/ui/login.py         Login screen
 app/ui/reset_password.py Password reset screen
-app/ui/dashboard.py     Dashboard, attendance, sold item, and today-data screens
-app/ui/admin.py         Owner/admin attendance panel
+app/ui/dashboard.py     Dashboard, attendance, sold item, and 5-day sales data screens
+app/ui/admin.py         Owner/admin attendance, announcements, and sales workbook panel
 assets/logo.jpeg        Business logo
 assets/app_icon.ico     Windows app/taskbar/exe icon
 ```
@@ -86,7 +145,7 @@ Saved local work is restored after login:
 - Active attendance day
 - Active shift/check-in state
 - Break state
-- Today's sold item entries
+- Last 5 days of sold item entries
 - Employee announcements
 
 ## Announcements

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -47,8 +47,28 @@ from app.ui.widgets import (
 from app.utils import duration_label, money_label, now_label, today_label
 
 
+def _amount_input_allowed(value: str) -> bool:
+    if value == "":
+        return True
+    if value.count(".") > 1:
+        return False
+    return all(character.isdigit() or character == "." for character in value)
+
+
+def _amount_value_valid(value: str) -> bool:
+    if not value or value == ".":
+        return False
+    if not _amount_input_allowed(value):
+        return False
+    try:
+        return float(value) >= 0
+    except ValueError:
+        return False
+
+
 class DashboardPage(tk.Frame):
     SHIFT_LOCKED_VIEWS = {"sales", "today"}
+    SALES_VISIBLE_DAYS = 5
 
     def __init__(self, parent: tk.Misc, app) -> None:
         super().__init__(parent, bg=BG)
@@ -57,7 +77,11 @@ class DashboardPage(tk.Frame):
         self.nav_buttons: dict[str, tk.Button] = {}
         self.views: dict[str, tk.Frame] = {}
         self.sales_vars: dict[str, tk.StringVar] = {}
+        self.sales_date_var = tk.StringVar()
+        self.status_other_var = tk.StringVar()
         self.sales_entries: list[dict[str, str]] = []
+        self.sales_selected_date = self._sales_date()
+        self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
         self.next_sales_id = 1
         self.attendance_events: list[dict[str, str]] = []
         self.checked_in = False
@@ -80,6 +104,7 @@ class DashboardPage(tk.Frame):
         self.close_first_shift_buttons: list[tk.Button] = []
         self.shift_required_buttons: list[tk.Button] = []
         self.sales_input_widgets: list[tk.Widget] = []
+        self.status_other_widgets: list[tk.Widget] = []
         self.notification_button: tk.Button | None = None
         self.notification_badge: tk.Label | None = None
         self.notification_dropdown: NotificationDropdown | None = None
@@ -150,7 +175,7 @@ class DashboardPage(tk.Frame):
             ("overview", "Dashboard"),
             ("attendance", "Attendance"),
             ("sales", "Sold Item Entry"),
-            ("today", "Today's Data"),
+            ("today", "5-Day Data"),
         ]
         for index, (key, label) in enumerate(nav_items):
             button = make_button(nav_container, label, lambda view=key: self.show_view(view), "sidebar", anchor="w")
@@ -260,7 +285,7 @@ class DashboardPage(tk.Frame):
         )
         self.access_notice = tk.Label(
             body,
-            text="Check in first to unlock sales, break, and today-data controls.",
+            text="Check in first to unlock sales, break, and 5-day data controls.",
             bg=WHITE,
             fg=WARNING,
             font=(FONT_BOLD, 9),
@@ -410,9 +435,13 @@ class DashboardPage(tk.Frame):
         tk.Label(form, text="Sold Item Entry", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
         )
-        tk.Label(form, text="Only today's entries are visible to the employee.", bg=WHITE, fg=MUTED, font=(FONT, 10)).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(0, 18)
-        )
+        tk.Label(
+            form,
+            text="The last 5 days of entries are visible to the employee.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 18))
 
         row = 2
         for index, (key, label, kind, values) in enumerate(SALES_FIELDS):
@@ -421,30 +450,15 @@ class DashboardPage(tk.Frame):
                 row += 2
             self._sales_field(form, key, label, row, column, kind, values)
 
-        tk.Label(form, text="Notes", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
-            row=row + 2, column=0, columnspan=2, sticky="w", pady=(8, 0)
-        )
-        self.notes_text = tk.Text(
-            form,
-            height=5,
-            bg="#f8fbff",
-            fg=TEXT,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=LINE,
-            highlightcolor=BLUE,
-            font=(FONT, 10),
-            wrap="word",
-        )
-        self.notes_text.grid(row=row + 3, column=0, columnspan=2, sticky="ew", pady=(8, 16))
-        self.sales_input_widgets.append(self.notes_text)
+        self._sales_date_field(form, row + 2, 0)
+        self._status_other_field(form, row + 2, 1)
 
         self.submit_sales_button = make_button(form, "Save Entry", self.submit_sales_entry, "primary")
-        self.submit_sales_button.grid(row=row + 4, column=0, sticky="ew", padx=(0, 8))
+        self.submit_sales_button.grid(row=row + 4, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
         self.shift_required_buttons.append(self.submit_sales_button)
 
         clear_form_button = make_button(form, "Clear Form", self.clear_sales_form, "light")
-        clear_form_button.grid(row=row + 4, column=1, sticky="ew", padx=(8, 0))
+        clear_form_button.grid(row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         self.shift_required_buttons.append(clear_form_button)
 
         side_card = SurfaceCard(view, padx=20, pady=20, accent=True, accent_start=SUCCESS, accent_end=TEAL)
@@ -453,9 +467,7 @@ class DashboardPage(tk.Frame):
         side.grid_columnconfigure(0, weight=1)
         tk.Label(side, text="Today", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(row=0, column=0, sticky="w")
         self.sales_today_count = tk.Label(side, text="0 entries", bg=WHITE, fg=BLUE, font=(FONT_BOLD, 28))
-        self.sales_today_count.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.sales_today_amount = tk.Label(side, text="Rs. 0", bg=WHITE, fg=SUCCESS, font=(FONT_BOLD, 16))
-        self.sales_today_amount.grid(row=2, column=0, sticky="w", pady=(6, 28))
+        self.sales_today_count.grid(row=1, column=0, sticky="w", pady=(8, 28))
 
         GradientBand(side, start=BLUE, end=TEAL, height=4).grid(row=3, column=0, sticky="ew", pady=(0, 18))
         tk.Label(side, text="Last Saved", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(row=4, column=0, sticky="w", pady=(0, 8))
@@ -471,76 +483,137 @@ class DashboardPage(tk.Frame):
         self.last_saved_label.grid(row=5, column=0, sticky="w")
         tk.Frame(side, bg=WHITE).grid(row=6, column=0, sticky="nsew")
         side.grid_rowconfigure(6, weight=1)
-        open_today_button = make_button(side, "Open Today's Data", lambda: self.show_view("today"), "light")
+        open_today_button = make_button(side, "Open 5-Day Data", lambda: self.show_view("today"), "light")
         open_today_button.grid(row=7, column=0, sticky="ew", pady=(18, 0))
         self.shift_required_buttons.append(open_today_button)
         return view
 
     def _build_today_view(self) -> tk.Frame:
         view = tk.Frame(self.content, bg=BG)
-        view.grid_rowconfigure(1, weight=1)
+        view.grid_rowconfigure(2, weight=1)
         view.grid_columnconfigure(0, weight=1)
 
         summary = SurfaceCard(view, padx=20, pady=16, accent=True, accent_start=BLUE, accent_end=TEAL)
         summary.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         body = summary.body
         body.grid_columnconfigure(0, weight=1)
-        tk.Label(body, text="Today's Data", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(row=0, column=0, sticky="w")
+        tk.Label(body, text="5-Day Sales Data", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(row=0, column=0, sticky="w")
         self.today_summary_label = tk.Label(body, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
         self.today_summary_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
         today_add_button = make_button(body, "Add New Entry", lambda: self.show_view("sales"), "primary")
         today_add_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
         self.shift_required_buttons.append(today_add_button)
 
+        days = tk.Frame(view, bg=BG)
+        days.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        for index in range(self.SALES_VISIBLE_DAYS):
+            days.grid_columnconfigure(index, weight=1, uniform="sales_day")
+            self._build_sales_day_card(days, index)
+
         table_card = SurfaceCard(view, padx=20, pady=18, accent=True, accent_start=TEAL, accent_end=BLUE)
-        table_card.grid(row=1, column=0, sticky="nsew")
+        table_card.grid(row=2, column=0, sticky="nsew")
         body = table_card.body
-        body.grid_rowconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
         body.grid_columnconfigure(0, weight=1)
 
-        columns = ("id", "time", "customer", "source", "item", "qty", "amount", "payment", "status")
+        table_header = tk.Frame(body, bg=WHITE)
+        table_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        table_header.grid_columnconfigure(0, weight=1)
+        self.selected_day_title_label = tk.Label(
+            table_header,
+            text="",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 15),
+        )
+        self.selected_day_title_label.grid(row=0, column=0, sticky="w")
+        self.selected_day_meta_label = tk.Label(
+            table_header,
+            text="",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+        )
+        self.selected_day_meta_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        columns = ("id", "time", "customer", "item", "email_order", "buying", "selling", "status")
         self.today_tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
         headings = {
             "id": "ID",
             "time": "Time",
             "customer": "Customer",
-            "source": "Source",
-            "item": "Item / Service",
-            "qty": "Qty",
-            "amount": "Amount",
-            "payment": "Payment",
+            "item": "Items Sold",
+            "email_order": "Email/Order ID",
+            "buying": "Buying",
+            "selling": "Selling",
             "status": "Status",
         }
         widths = {
-            "id": 54,
-            "time": 92,
-            "customer": 150,
-            "source": 100,
-            "item": 190,
-            "qty": 60,
-            "amount": 92,
-            "payment": 120,
-            "status": 110,
+            "id": 58,
+            "time": 96,
+            "customer": 170,
+            "item": 250,
+            "email_order": 250,
+            "buying": 105,
+            "selling": 105,
+            "status": 190,
         }
         for column in columns:
-            self.today_tree.heading(column, text=headings[column])
-            self.today_tree.column(column, width=widths[column], anchor="w")
-        self.today_tree.grid(row=0, column=0, sticky="nsew")
+            self.today_tree.heading(column, text=headings[column], anchor="w")
+            self.today_tree.column(
+                column,
+                width=widths[column],
+                minwidth=widths[column],
+                anchor="w",
+                stretch=False,
+            )
+        self.today_tree.tag_configure("entry_even", background=WHITE, foreground=TEXT)
+        self.today_tree.tag_configure("entry_odd", background="#f8fbff", foreground=TEXT)
+        self.today_tree.grid(row=1, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.today_tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.today_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        xscrollbar = ttk.Scrollbar(body, orient="horizontal", command=self.today_tree.xview)
+        xscrollbar.grid(row=2, column=0, sticky="ew")
+        self.today_tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscrollbar.set)
 
         actions = tk.Frame(body, bg=WHITE)
-        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         edit_selected_button = make_button(actions, "Edit Selected", self.edit_selected_entry, "primary")
         edit_selected_button.pack(side="left", padx=(0, 10))
         self.shift_required_buttons.append(edit_selected_button)
-
-        remove_selected_button = make_button(actions, "Remove Selected", self.delete_selected_entry, "danger")
-        remove_selected_button.pack(side="left")
-        self.shift_required_buttons.append(remove_selected_button)
         return view
+
+    def _build_sales_day_card(self, parent: tk.Misc, index: int) -> None:
+        card = tk.Frame(
+            parent,
+            bg=WHITE,
+            padx=14,
+            pady=12,
+            highlightbackground=LINE,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
+        card.grid_columnconfigure(0, weight=1)
+        label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 9), cursor="hand2")
+        label.grid(row=0, column=0, sticky="w")
+        date_label = tk.Label(card, text="", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12), cursor="hand2")
+        date_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        count_label = tk.Label(card, text="", bg=WHITE, fg=BLUE, font=(FONT_BOLD, 10), cursor="hand2")
+        count_label.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        status_label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=(FONT, 9), cursor="hand2")
+        status_label.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        slot = {
+            "card": card,
+            "label": label,
+            "date": date_label,
+            "count": count_label,
+            "status": status_label,
+        }
+        self.sales_day_card_slots.append(slot)
+        for widget in slot.values():
+            widget.bind("<Button-1>", lambda _event, slot_index=index: self._select_sales_day_slot(slot_index))
 
     def _sales_field(
         self,
@@ -553,8 +626,8 @@ class DashboardPage(tk.Frame):
         values: list[str] | None,
     ) -> None:
         variable = tk.StringVar()
-        if key == "quantity":
-            variable.set("1")
+        if key == "buying_amount":
+            variable.set("0")
         if values:
             variable.set(values[0])
         self.sales_vars[key] = variable
@@ -563,11 +636,52 @@ class DashboardPage(tk.Frame):
         if kind == "combo" and values:
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
+            if key == "status":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
             self.sales_input_widgets.append(widget)
             return
         widget = text_entry(parent, variable)
+        if key in {"buying_amount", "selling_amount"}:
+            widget.configure(
+                validate="key",
+                validatecommand=(self.register(_amount_input_allowed), "%P"),
+            )
         widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
         self.sales_input_widgets.append(widget)
+
+    def _sales_date_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        field_label(parent, "Date").grid(row=row, column=column, sticky="w")
+        widget = text_entry(parent, self.sales_date_var)
+        widget.configure(
+            state="disabled",
+            disabledbackground="#eef6ff",
+            disabledforeground=TEXT,
+        )
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, pady=(8, 14))
+
+    def _status_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        padx = (12, 0)
+        label = field_label(parent, "Other Status Reason")
+        label.grid(row=row, column=column, sticky="w", padx=padx)
+        widget = text_entry(parent, self.status_other_var)
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+        self.status_other_widgets = [label, widget]
+        self.sales_input_widgets.append(widget)
+        self._update_status_other_visibility()
+
+    def _update_status_other_visibility(self) -> None:
+        show_other = self.sales_vars.get("status") is not None and self.sales_vars["status"].get() == "Other"
+        for widget in self.status_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _resolved_status(self, selected_status: str, other_reason: str) -> str | None:
+        if selected_status == "Other":
+            status = other_reason.strip()
+            return status or None
+        return selected_status or "Done"
 
     def _require_shift_active(self) -> bool:
         if self.checked_in:
@@ -584,10 +698,67 @@ class DashboardPage(tk.Frame):
         return self.app.display_user
 
     def _sales_date(self) -> str:
-        return self.current_day_date or datetime.now().strftime("%Y-%m-%d")
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _sales_date_display(self) -> str:
+        try:
+            value = datetime.strptime(self._sales_date(), "%Y-%m-%d")
+        except ValueError:
+            value = datetime.now()
+        return f"{value.day}/{value.month}/{value.year}"
+
+    def _sales_visible_dates(self) -> list[str]:
+        today = datetime.now().date()
+        first_day = today - timedelta(days=self.SALES_VISIBLE_DAYS - 1)
+        return [
+            (first_day + timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(self.SALES_VISIBLE_DAYS)
+        ]
+
+    def _sales_window_label(self) -> str:
+        visible_dates = self._sales_visible_dates()
+        first_day = datetime.strptime(visible_dates[0], "%Y-%m-%d")
+        last_day = datetime.strptime(visible_dates[-1], "%Y-%m-%d")
+        return f"{first_day.strftime('%d %b')} - {last_day.strftime('%d %b %Y')}"
+
+    def _sales_day_title(self, value: str) -> str:
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return f"Data {value}"
+        return f"Data {parsed.strftime('%d %B %Y')}"
+
+    def _sales_day_label(self, value: str) -> str:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if value == today:
+            return "Today"
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return "Sales Day"
+        return parsed.strftime("%A")
+
+    def _entry_count_text(self, count: int) -> str:
+        return f"{count} entry" if count == 1 else f"{count} entries"
+
+    def _sales_entries_for_date(self, entry_date: str) -> list[dict[str, str]]:
+        return [entry for entry in self.sales_entries if entry["date"] == entry_date]
+
+    def _sales_entry_display_number(self, entry: dict[str, str]) -> int:
+        entry_id = str(entry.get("id", ""))
+        for index, day_entry in enumerate(self._sales_entries_for_date(entry.get("date", "")), start=1):
+            if str(day_entry.get("id", "")) == entry_id:
+                return index
+        return 1
 
     def _refresh_sales_entries_from_store(self) -> None:
-        entries = self.app.attendance_store.list_sales_entries(self._employee_username(), self._sales_date())
+        visible_dates = self._sales_visible_dates()
+        self.app.attendance_store.purge_old_synced_sales_entries(self._employee_username(), visible_dates[0])
+        if self.sales_selected_date not in visible_dates:
+            self.sales_selected_date = visible_dates[-1]
+        entries = []
+        for entry_date in visible_dates:
+            entries.extend(self.app.attendance_store.list_sales_entries(self._employee_username(), entry_date))
         normalized = []
         for entry in entries:
             item = dict(entry)
@@ -596,6 +767,46 @@ class DashboardPage(tk.Frame):
             item["time"] = item.pop("entry_time")
             normalized.append(item)
         self.sales_entries = normalized
+
+    def _select_sales_day_slot(self, index: int) -> None:
+        visible_dates = self._sales_visible_dates()
+        if index < 0 or index >= len(visible_dates):
+            return
+        self.select_sales_date(visible_dates[index])
+
+    def select_sales_date(self, entry_date: str) -> None:
+        if entry_date not in self._sales_visible_dates():
+            return
+        self.sales_selected_date = entry_date
+        self._refresh_sales_day_cards()
+        self._refresh_selected_sales_day_header()
+        self._refresh_today_table()
+
+    def _refresh_sales_day_cards(self) -> None:
+        visible_dates = self._sales_visible_dates()
+        for index, slot in enumerate(self.sales_day_card_slots):
+            if index >= len(visible_dates):
+                continue
+            entry_date = visible_dates[index]
+            day_entries = self._sales_entries_for_date(entry_date)
+            selected = entry_date == self.sales_selected_date
+            card_bg = "#eaf2ff" if selected else WHITE
+            border = BLUE if selected else LINE
+            title_fg = BLUE_DARK if selected else TEXT
+            muted_fg = BLUE_DARK if selected else MUTED
+            count_fg = BLUE if selected else NAVY
+            slot["card"].configure(bg=card_bg, highlightbackground=border)
+            slot["label"].configure(text=self._sales_day_label(entry_date), bg=card_bg, fg=muted_fg)
+            slot["date"].configure(text=self._sales_day_title(entry_date), bg=card_bg, fg=title_fg)
+            slot["count"].configure(text=self._entry_count_text(len(day_entries)), bg=card_bg, fg=count_fg)
+            slot["status"].configure(text="Selected" if selected else "", bg=card_bg, fg=SUCCESS)
+
+    def _refresh_selected_sales_day_header(self) -> None:
+        selected_entries = self._sales_entries_for_date(self.sales_selected_date)
+        self.selected_day_title_label.configure(text=self._sales_day_title(self.sales_selected_date))
+        self.selected_day_meta_label.configure(
+            text=f"{self._entry_count_text(len(selected_entries))} saved for this date"
+        )
 
     def _sync_attendance_state(self) -> None:
         active_day = self.app.attendance_store.get_active_day(self._employee_username())
@@ -649,6 +860,7 @@ class DashboardPage(tk.Frame):
                 widget.configure(state="normal" if enabled else "disabled")
             else:
                 widget.configure(state="normal" if enabled else "disabled")
+        self._update_status_other_visibility()
 
     def _apply_access_state(self) -> None:
         shift_active = self.checked_in
@@ -679,7 +891,7 @@ class DashboardPage(tk.Frame):
 
         self._set_sales_inputs_enabled(shift_active)
         if shift_active:
-            self.access_notice.configure(text="Sales, breaks, and today-data controls are unlocked.", fg=SUCCESS)
+            self.access_notice.configure(text="Sales, breaks, and 5-day data controls are unlocked.", fg=SUCCESS)
         elif self.day_active:
             self.access_notice.configure(text="Day is started. Check in to unlock work controls.", fg=BLUE)
         else:
@@ -711,6 +923,7 @@ class DashboardPage(tk.Frame):
 
     def refresh_all(self) -> None:
         self._sync_attendance_state()
+        self.sales_date_var.set(self._sales_date_display())
         self._refresh_sales_entries_from_store()
         self.user_label.configure(text=f"Signed in as {self.app.display_user}")
         self.welcome_banner.set_text(
@@ -748,7 +961,8 @@ class DashboardPage(tk.Frame):
         self.shift_pill.configure(text=shift_status, fg=accent if accent != MUTED else BLUE_DARK, bg=pill_bg)
         self.status_card.value_label.configure(text=shift_status, fg=accent)
         self.status_card.helper_label.configure(text=self._shift_label() if self.checked_in else self._day_label())
-        self.entries_card.value_label.configure(text=str(len(self.sales_entries)))
+        today_entries = self._sales_entries_for_date(self._sales_date())
+        self.entries_card.value_label.configure(text=str(len(today_entries)))
         self.break_card.value_label.configure(text=duration_label(self.current_break_seconds()))
 
         self.attendance_status.configure(text=shift_status, fg=accent)
@@ -759,15 +973,12 @@ class DashboardPage(tk.Frame):
         self.break_time_label.configure(text=f"Break time: {duration_label(self.current_break_seconds())}")
         self.attendance_date_label.configure(text=today_label())
 
-        total = 0.0
-        for entry in self.sales_entries:
-            try:
-                total += float(entry.get("amount", "0") or 0)
-            except ValueError:
-                pass
-        self.sales_today_count.configure(text=f"{len(self.sales_entries)} entries")
-        self.sales_today_amount.configure(text=f"Rs. {money_label(str(total))}")
-        self.today_summary_label.configure(text=f"{today_label()} | {len(self.sales_entries)} entries | Rs. {money_label(str(total))}")
+        self.sales_today_count.configure(text=self._entry_count_text(len(today_entries)))
+        self.today_summary_label.configure(
+            text=f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} visible for 5 days"
+        )
+        self._refresh_sales_day_cards()
+        self._refresh_selected_sales_day_header()
         self._apply_access_state()
 
     def _refresh_attendance_log(self) -> None:
@@ -788,20 +999,21 @@ class DashboardPage(tk.Frame):
     def _refresh_today_table(self) -> None:
         for item in self.today_tree.get_children():
             self.today_tree.delete(item)
-        for entry in self.sales_entries:
+        for index, entry in enumerate(self._sales_entries_for_date(self.sales_selected_date)):
+            tag = "entry_even" if index % 2 == 0 else "entry_odd"
             self.today_tree.insert(
                 "",
                 "end",
                 iid=str(entry["id"]),
+                tags=(tag,),
                 values=(
-                    entry["id"],
+                    str(index + 1),
                     entry["time"],
                     entry["customer"],
-                    entry["platform"],
                     entry["item"],
-                    entry["quantity"],
-                    money_label(entry["amount"]),
-                    entry["payment"],
+                    entry["order_id"],
+                    money_label(entry["buying_amount"]),
+                    money_label(entry["selling_amount"]),
                     entry["status"],
                 ),
             )
@@ -810,7 +1022,10 @@ class DashboardPage(tk.Frame):
         self.recent_list.delete(0, tk.END)
         items: list[str] = []
         for entry in self.sales_entries[-5:]:
-            items.append(f"{entry['time']} - Sale #{entry['id']}: {entry['item']} ({entry['quantity']})")
+            display_number = self._sales_entry_display_number(entry)
+            items.append(
+                f"{entry['time']} - Sale #{display_number}: {entry['item']} - Rs. {money_label(entry['selling_amount'])}"
+            )
         for event in self.attendance_events[-5:]:
             items.append(f"{self._format_event_time(event['event_time'])} - {event['event_label']}")
         if not items:
@@ -973,48 +1188,66 @@ class DashboardPage(tk.Frame):
         if not self._require_shift_active():
             return
         for key, variable in self.sales_vars.items():
-            if key == "quantity":
-                variable.set("1")
-            elif key == "platform":
-                variable.set("WhatsApp")
-            elif key == "payment":
-                variable.set("Cash")
+            if key == "buying_amount":
+                variable.set("0")
             elif key == "status":
-                variable.set("Completed")
+                variable.set("Done")
             else:
                 variable.set("")
-        self.notes_text.delete("1.0", tk.END)
+        self.status_other_var.set("")
+        self._update_status_other_visibility()
 
     def submit_sales_entry(self) -> None:
         if not self._require_shift_active():
             return
         entry = {key: variable.get().strip() for key, variable in self.sales_vars.items()}
-        entry["notes"] = self.notes_text.get("1.0", tk.END).strip()
 
+        if not entry["customer"]:
+            messagebox.showerror("Missing customer", "Customer Name is required.")
+            return
         if not entry["item"]:
-            messagebox.showerror("Missing item", "Item / Service is required.")
+            messagebox.showerror("Missing item", "Items Sold is required.")
             return
-        try:
-            quantity = int(entry["quantity"])
-            if quantity <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Invalid quantity", "Quantity must be a whole number greater than zero.")
+        if not entry["buying_amount"]:
+            entry["buying_amount"] = "0"
+        if not entry["selling_amount"]:
+            messagebox.showerror("Missing selling amount", "Selling Amount is required.")
             return
-        if entry["amount"]:
-            try:
-                float(entry["amount"])
-            except ValueError:
-                messagebox.showerror("Invalid amount", "Sale Amount must be a number.")
+        for key, label in (("buying_amount", "Buying Amount"), ("selling_amount", "Selling Amount")):
+            if not _amount_value_valid(entry[key]):
+                messagebox.showerror("Invalid amount", f"{label} must be a number.")
                 return
+        resolved_status = self._resolved_status(entry["status"], self.status_other_var.get())
+        if resolved_status is None:
+            messagebox.showerror("Missing status reason", "Please write the reason for Other status.")
+            return
+        entry["status"] = resolved_status
 
         entry["date"] = self._sales_date()
         entry["time"] = now_label()
         saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
-        self.last_saved_label.configure(text=f"#{saved['id']} {entry['item']} saved at {entry['time']}")
+        sync_result = self.app.sales_workbook.sync_entry(saved)
+        if sync_result.saved and sync_result.row is not None:
+            saved = self.app.attendance_store.mark_sales_excel_sync(
+                int(saved["id"]),
+                self._employee_username(),
+                sync_result.row,
+            )
+            messagebox.showinfo("Entry saved", "Sold item entry saved.")
+        else:
+            saved = self.app.attendance_store.mark_sales_excel_error(
+                int(saved["id"]),
+                self._employee_username(),
+                sync_result.message,
+            )
+            messagebox.showwarning(
+                "Entry saved locally",
+                f"Entry was saved in the app, but Excel sync failed:\n{sync_result.message}",
+            )
+        daily_number = len(self.app.attendance_store.list_sales_entries(self._employee_username(), entry["date"]))
+        self.last_saved_label.configure(text=f"#{daily_number} {entry['item']} saved at {entry['time']}")
         self.clear_sales_form()
         self.refresh_all()
-        messagebox.showinfo("Entry saved", "Sold item entry saved for today.")
 
     def selected_entry(self) -> dict[str, str] | None:
         selection = self.today_tree.selection()
@@ -1036,31 +1269,30 @@ class DashboardPage(tk.Frame):
             return
         EditEntryWindow(self, entry)
 
-    def delete_selected_entry(self) -> None:
-        if not self._require_shift_active():
-            return
-        entry = self.selected_entry()
-        if entry is None:
-            return
-        if not messagebox.askyesno("Remove entry", f"Remove entry #{entry['id']} from today's data?"):
-            return
-        self.app.attendance_store.delete_sales_entry(int(entry["id"]), self._employee_username())
-        self.refresh_all()
-
 
 class EditEntryWindow(tk.Toplevel):
     def __init__(self, dashboard: DashboardPage, entry: dict[str, str]) -> None:
         super().__init__(dashboard)
         self.dashboard = dashboard
         self.entry = entry
-        self.title(f"Edit Entry #{entry['id']}")
-        self.geometry("640x580")
-        self.minsize(580, 540)
+        self.display_number = dashboard._sales_entry_display_number(entry)
+        self.title(f"Edit Entry #{self.display_number}")
+        self.geometry("760x560")
+        self.minsize(720, 540)
         self.configure(bg=BG)
         self.transient(dashboard.app)
+        self._set_window_icon()
         self.grab_set()
         self.vars: dict[str, tk.StringVar] = {}
+        self.status_other_var = tk.StringVar()
+        self.status_other_widgets: list[tk.Widget] = []
         self._build()
+        self._center_on_parent()
+
+    def _set_window_icon(self) -> None:
+        logo = self.dashboard.app.get_logo((96, 96))
+        if logo is not None:
+            self.iconphoto(False, logo)
 
     def _build(self) -> None:
         panel = SurfaceCard(self, padx=24, pady=22, accent=True, accent_start=BLUE, accent_end=TEAL)
@@ -1068,7 +1300,7 @@ class EditEntryWindow(tk.Toplevel):
         body = panel.body
         body.grid_columnconfigure((0, 1), weight=1)
 
-        tk.Label(body, text=f"Edit Entry #{self.entry['id']}", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+        tk.Label(body, text=f"Edit Entry #{self.display_number}", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 18)
         )
 
@@ -1079,26 +1311,10 @@ class EditEntryWindow(tk.Toplevel):
                 row += 2
             self._field(body, key, label, row, column, kind, values)
 
-        tk.Label(body, text="Notes", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
-            row=row + 2, column=0, columnspan=2, sticky="w", pady=(8, 0)
-        )
-        self.notes_text = tk.Text(
-            body,
-            height=5,
-            bg="#f8fbff",
-            fg=TEXT,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=LINE,
-            highlightcolor=BLUE,
-            font=(FONT, 10),
-            wrap="word",
-        )
-        self.notes_text.insert("1.0", self.entry.get("notes", ""))
-        self.notes_text.grid(row=row + 3, column=0, columnspan=2, sticky="ew", pady=(8, 16))
+        self._status_other_field(body, row + 2, 0)
 
-        make_button(body, "Save Changes", self.save, "primary").grid(row=row + 4, column=0, sticky="ew", padx=(0, 8))
-        make_button(body, "Cancel", self.destroy, "light").grid(row=row + 4, column=1, sticky="ew", padx=(8, 0))
+        make_button(body, "Save Changes", self.save, "primary").grid(row=row + 4, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
+        make_button(body, "Cancel", self.destroy, "light").grid(row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
     def _field(
         self,
@@ -1110,43 +1326,107 @@ class EditEntryWindow(tk.Toplevel):
         kind: str,
         values: list[str] | None,
     ) -> None:
-        variable = tk.StringVar(value=self.entry.get(key, ""))
+        value = self.entry.get(key, "")
+        if key == "status" and values and value not in values:
+            variable = tk.StringVar(value="Other")
+            self.status_other_var.set(value)
+        else:
+            variable = tk.StringVar(value=value)
         self.vars[key] = variable
         padx = (0 if column == 0 else 12, 0)
         field_label(parent, label).grid(row=row, column=column, sticky="w", padx=padx)
         if kind == "combo" and values:
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
+            if key == "status":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
             return
         widget = text_entry(parent, variable)
+        if key in {"buying_amount", "selling_amount"}:
+            widget.configure(
+                validate="key",
+                validatecommand=(self.register(_amount_input_allowed), "%P"),
+            )
         widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+
+    def _center_on_parent(self) -> None:
+        self.update_idletasks()
+        parent = self.dashboard.app
+        parent.update_idletasks()
+        width = max(self.winfo_width(), 760)
+        height = max(self.winfo_height(), 560)
+        x_position = parent.winfo_rootx() + max((parent.winfo_width() - width) // 2, 0)
+        y_position = parent.winfo_rooty() + max((parent.winfo_height() - height) // 2, 0)
+        self.geometry(f"{width}x{height}+{x_position}+{y_position}")
+
+    def _status_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        label = field_label(parent, "Other Status Reason")
+        label.grid(row=row, column=column, columnspan=2, sticky="w")
+        widget = text_entry(parent, self.status_other_var)
+        widget.grid(row=row + 1, column=column, columnspan=2, sticky="ew", ipady=8, pady=(8, 14))
+        self.status_other_widgets = [label, widget]
+        self._update_status_other_visibility()
+
+    def _update_status_other_visibility(self) -> None:
+        show_other = self.vars.get("status") is not None and self.vars["status"].get() == "Other"
+        for widget in self.status_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _resolved_status(self, selected_status: str, other_reason: str) -> str | None:
+        if selected_status == "Other":
+            status = other_reason.strip()
+            return status or None
+        return selected_status or "Done"
 
     def save(self) -> None:
         updates = {key: variable.get().strip() for key, variable in self.vars.items()}
-        updates["notes"] = self.notes_text.get("1.0", tk.END).strip()
+        if not updates["customer"]:
+            messagebox.showerror("Missing customer", "Customer Name is required.")
+            return
         if not updates["item"]:
-            messagebox.showerror("Missing item", "Item / Service is required.")
+            messagebox.showerror("Missing item", "Items Sold is required.")
             return
-        try:
-            quantity = int(updates["quantity"])
-            if quantity <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Invalid quantity", "Quantity must be a whole number greater than zero.")
+        if not updates["buying_amount"]:
+            updates["buying_amount"] = "0"
+        if not updates["selling_amount"]:
+            messagebox.showerror("Missing selling amount", "Selling Amount is required.")
             return
-        if updates["amount"]:
-            try:
-                float(updates["amount"])
-            except ValueError:
-                messagebox.showerror("Invalid amount", "Sale Amount must be a number.")
+        for key, label in (("buying_amount", "Buying Amount"), ("selling_amount", "Selling Amount")):
+            if not _amount_value_valid(updates[key]):
+                messagebox.showerror("Invalid amount", f"{label} must be a number.")
                 return
-        self.dashboard.app.attendance_store.update_sales_entry(
+        resolved_status = self._resolved_status(updates["status"], self.status_other_var.get())
+        if resolved_status is None:
+            messagebox.showerror("Missing status reason", "Please write the reason for Other status.")
+            return
+        updates["status"] = resolved_status
+        updated = self.dashboard.app.attendance_store.update_sales_entry(
             int(self.entry["id"]),
             self.dashboard._employee_username(),
             updates,
         )
-        self.entry.update(updates)
-        self.dashboard.last_saved_label.configure(text=f"#{self.entry['id']} updated at {now_label()}")
+        sync_result = self.dashboard.app.sales_workbook.sync_entry(updated)
+        if sync_result.saved and sync_result.row is not None:
+            updated = self.dashboard.app.attendance_store.mark_sales_excel_sync(
+                int(self.entry["id"]),
+                self.dashboard._employee_username(),
+                sync_result.row,
+            )
+        else:
+            updated = self.dashboard.app.attendance_store.mark_sales_excel_error(
+                int(self.entry["id"]),
+                self.dashboard._employee_username(),
+                sync_result.message,
+            )
+            messagebox.showwarning(
+                "Entry updated locally",
+                f"Entry was updated in the app, but Excel sync failed:\n{sync_result.message}",
+            )
+        self.entry.update(updated)
+        self.dashboard.last_saved_label.configure(text=f"#{self.display_number} updated at {now_label()}")
         self.dashboard.refresh_all()
         self.destroy()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
@@ -11,7 +12,18 @@ except Exception:  # pragma: no cover - the app can still run without the logo.
     ImageTk = None
 
 from app.auth import AuthStore
-from app.config import APP_DB_PATH, APP_ICON_PATH, APP_NAME, AUTH_CONFIG_PATH, BG, DEFAULT_USERNAME, LOGO_PATH
+from app.config import (
+    APP_DB_PATH,
+    APP_ICON_PATH,
+    APP_NAME,
+    AUTH_CONFIG_PATH,
+    BG,
+    DEFAULT_USERNAME,
+    LOGO_PATH,
+    SALES_WORKBOOK_PATH,
+    SALES_WORKSHEET_NAME,
+)
+from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
@@ -30,6 +42,8 @@ class EmployeeApp(tk.Tk):
 
         self.auth = AuthStore(AUTH_CONFIG_PATH)
         self.attendance_store = AttendanceStore(APP_DB_PATH)
+        self.sales_workbook = SalesWorkbook()
+        self.load_sales_workbook_settings()
         self.logo_cache: dict[tuple[int, int], tk.PhotoImage] = {}
         self.current_user = ""
         self.current_role = ""
@@ -115,6 +129,16 @@ class EmployeeApp(tk.Tk):
         self.current_user = ""
         self.current_role = ""
         self.destroy()
+
+    def load_sales_workbook_settings(self) -> None:
+        workbook_path = self.attendance_store.get_setting("sales_workbook_path", str(SALES_WORKBOOK_PATH))
+        worksheet_name = self.attendance_store.get_setting("sales_worksheet_name", SALES_WORKSHEET_NAME)
+        self.sales_workbook = SalesWorkbook(Path(workbook_path), worksheet_name)
+
+    def save_sales_workbook_settings(self, workbook_path: str, worksheet_name: str) -> None:
+        self.attendance_store.set_setting("sales_workbook_path", workbook_path)
+        self.attendance_store.set_setting("sales_worksheet_name", worksheet_name)
+        self.sales_workbook = SalesWorkbook(Path(workbook_path), worksheet_name)
 
     @property
     def display_user(self) -> str:

@@ -38,6 +38,11 @@ APP_ICON_PATH = ASSET_DIR / "app_icon.ico"
 DATA_DIR = _app_data_root() if getattr(sys, "frozen", False) else BASE_DIR / "data"
 AUTH_CONFIG_PATH = DATA_DIR / "auth_config.json"
 APP_DB_PATH = DATA_DIR / "employee_management.sqlite3"
+MANAGED_SALES_WORKBOOK_PATH = DATA_DIR / "sales_workbook.xlsx"
+_sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH") or str(DATA_DIR / "sales_entries.xlsx")
+SALES_WORKBOOK_PATH = Path(os.path.expandvars(_sales_workbook_setting)).expanduser()
+SALES_WORKSHEET_NAME = os.environ.get("DSP_SALES_WORKSHEET_NAME", "").strip()
+SALES_EXCEL_DATE_FORMAT = "d/m/yyyy"
 
 NAVY = "#07063f"
 NAVY_2 = "#0d1668"
@@ -74,11 +79,9 @@ FONT_BOLD = "Segoe UI Semibold"
 
 SALES_FIELDS = [
     ("customer", "Customer Name", "entry", None),
-    ("platform", "Order Source", "combo", ["WhatsApp", "Instagram", "Facebook", "Website", "Walk-in", "Other"]),
-    ("order_id", "Order ID", "entry", None),
-    ("item", "Item / Service", "entry", None),
-    ("quantity", "Quantity", "entry", None),
-    ("amount", "Sale Amount", "entry", None),
-    ("payment", "Payment Method", "combo", ["Cash", "Bank Transfer", "JazzCash", "EasyPaisa", "Card", "Pending"]),
-    ("status", "Order Status", "combo", ["Completed", "Processing", "Pending", "Cancelled"]),
+    ("item", "Items Sold", "entry", None),
+    ("order_id", "Email/Order ID", "entry", None),
+    ("buying_amount", "Buying Amount", "entry", None),
+    ("selling_amount", "Selling Amount", "entry", None),
+    ("status", "Status", "combo", ["Done", "Pending", "Cancelled", "Other"]),
 ]

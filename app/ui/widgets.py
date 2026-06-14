@@ -415,3 +415,16 @@ def configure_treeview(style: ttk.Style) -> None:
     style.configure("Treeview.Heading", font=(FONT_BOLD, 10), background="#e7f0ff", foreground=TEXT, relief="flat")
     style.map("Treeview", background=[("selected", BLUE)], foreground=[("selected", WHITE)])
     style.configure("TCombobox", fieldbackground=WHITE, background=WHITE, foreground=TEXT)
+    style.configure("TNotebook", background=BG, borderwidth=0)
+    style.configure(
+        "TNotebook.Tab",
+        font=(FONT_BOLD, 10),
+        padding=(18, 10),
+        background="#e7f0ff",
+        foreground=MUTED,
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", WHITE), ("active", "#eef6ff")],
+        foreground=[("selected", TEXT), ("active", BLUE_DARK)],
+    )

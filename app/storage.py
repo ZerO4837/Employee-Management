@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
@@ -27,16 +29,53 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
     return dict(row)
 
 
+def _money_text(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _profit_value(buying_amount: str, selling_amount: str) -> str:
+    try:
+        buying = float((buying_amount or "0").replace(",", ""))
+        selling = float((selling_amount or "0").replace(",", ""))
+    except ValueError:
+        return ""
+    return _money_text(selling - buying)
+
+
+def _normalize_sales_row(row: sqlite3.Row | None) -> dict | None:
+    item = _row_to_dict(row)
+    if item is None:
+        return None
+    if not item.get("selling_amount") and item.get("amount"):
+        item["selling_amount"] = item["amount"]
+    if not item.get("buying_amount"):
+        item["buying_amount"] = "0"
+    if not item.get("profit"):
+        item["profit"] = _profit_value(item.get("buying_amount", "0"), item.get("selling_amount", ""))
+    return item
+
+
 class AttendanceStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     def _init_schema(self) -> None:
         with self.connect() as connection:
@@ -127,6 +166,15 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS sales_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     employee_username TEXT NOT NULL,
@@ -141,11 +189,18 @@ class AttendanceStore:
                     payment TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT '',
                     notes TEXT NOT NULL DEFAULT '',
+                    buying_amount TEXT NOT NULL DEFAULT '',
+                    selling_amount TEXT NOT NULL DEFAULT '',
+                    profit TEXT NOT NULL DEFAULT '',
+                    excel_row INTEGER,
+                    excel_synced_at TEXT NOT NULL DEFAULT '',
+                    excel_sync_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_sales_schema(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_attendance_shift_lookup
@@ -184,9 +239,70 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_app_settings_lookup
+                ON app_settings (setting_key)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_sales_entries_lookup
                 ON sales_entries (employee_username, entry_date)
                 """
+            )
+
+    def _ensure_sales_schema(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(sales_entries)").fetchall()
+        }
+        required_columns = {
+            "buying_amount": "TEXT NOT NULL DEFAULT ''",
+            "selling_amount": "TEXT NOT NULL DEFAULT ''",
+            "profit": "TEXT NOT NULL DEFAULT ''",
+            "excel_row": "INTEGER",
+            "excel_synced_at": "TEXT NOT NULL DEFAULT ''",
+            "excel_sync_error": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in required_columns.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE sales_entries ADD COLUMN {name} {definition}")
+        connection.execute(
+            """
+            UPDATE sales_entries
+            SET selling_amount = amount
+            WHERE selling_amount = '' AND amount <> ''
+            """
+        )
+        connection.execute(
+            """
+            UPDATE sales_entries
+            SET buying_amount = '0'
+            WHERE buying_amount = ''
+            """
+        )
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT setting_value FROM app_settings WHERE setting_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return default
+        return str(row["setting_value"])
+
+    def set_setting(self, key: str, value: str) -> None:
+        updated_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, updated_at),
             )
 
     def get_active_day(self, employee_username: str) -> dict | None:
@@ -636,70 +752,80 @@ class AttendanceStore:
                 """,
                 (employee_username, entry_date),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
 
     def create_sales_entry(self, employee_username: str, entry_date: str, entry: dict[str, str]) -> dict:
         created_at = _iso()
+        buying_amount = entry.get("buying_amount", "0")
+        selling_amount = entry.get("selling_amount", "")
+        profit = _profit_value(buying_amount, selling_amount)
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO sales_entries
                 (
                     employee_username, entry_date, entry_time, customer, platform, order_id,
-                    item, quantity, amount, payment, status, notes, created_at, updated_at
+                    item, quantity, amount, payment, status, notes, buying_amount, selling_amount,
+                    profit, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     employee_username,
                     entry_date,
                     entry.get("time", ""),
                     entry.get("customer", ""),
-                    entry.get("platform", ""),
+                    "",
                     entry.get("order_id", ""),
                     entry.get("item", ""),
-                    entry.get("quantity", ""),
-                    entry.get("amount", ""),
-                    entry.get("payment", ""),
+                    "",
+                    selling_amount,
+                    "",
                     entry.get("status", ""),
                     entry.get("notes", ""),
+                    buying_amount,
+                    selling_amount,
+                    profit,
                     created_at,
                     created_at,
                 ),
             )
             row = connection.execute("SELECT * FROM sales_entries WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
-        created = _row_to_dict(row)
+        created = _normalize_sales_row(row)
         if created is None:
             raise RuntimeError("Failed to create sales entry.")
         return created
 
     def update_sales_entry(self, entry_id: int, employee_username: str, updates: dict[str, str]) -> dict:
         updated_at = _iso()
+        buying_amount = updates.get("buying_amount", "0")
+        selling_amount = updates.get("selling_amount", "")
+        profit = _profit_value(buying_amount, selling_amount)
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE sales_entries
                 SET customer = ?,
-                    platform = ?,
                     order_id = ?,
                     item = ?,
-                    quantity = ?,
                     amount = ?,
-                    payment = ?,
                     status = ?,
+                    buying_amount = ?,
+                    selling_amount = ?,
+                    profit = ?,
                     notes = ?,
                     updated_at = ?
                 WHERE id = ? AND employee_username = ?
                 """,
                 (
                     updates.get("customer", ""),
-                    updates.get("platform", ""),
                     updates.get("order_id", ""),
                     updates.get("item", ""),
-                    updates.get("quantity", ""),
-                    updates.get("amount", ""),
-                    updates.get("payment", ""),
+                    selling_amount,
                     updates.get("status", ""),
+                    buying_amount,
+                    selling_amount,
+                    profit,
                     updates.get("notes", ""),
                     updated_at,
                     entry_id,
@@ -710,10 +836,78 @@ class AttendanceStore:
                 "SELECT * FROM sales_entries WHERE id = ? AND employee_username = ?",
                 (entry_id, employee_username),
             ).fetchone()
-        updated = _row_to_dict(row)
+        updated = _normalize_sales_row(row)
         if updated is None:
             raise ValueError("Sales entry could not be found.")
         return updated
+
+    def mark_sales_excel_sync(self, entry_id: int, employee_username: str, excel_row: int) -> dict:
+        synced_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET excel_row = ?,
+                    excel_synced_at = ?,
+                    excel_sync_error = '',
+                    updated_at = ?
+                WHERE id = ? AND employee_username = ?
+                """,
+                (excel_row, synced_at, synced_at, entry_id, employee_username),
+            )
+            row = connection.execute(
+                "SELECT * FROM sales_entries WHERE id = ? AND employee_username = ?",
+                (entry_id, employee_username),
+            ).fetchone()
+        synced = _normalize_sales_row(row)
+        if synced is None:
+            raise ValueError("Sales entry could not be found.")
+        return synced
+
+    def mark_sales_excel_error(self, entry_id: int, employee_username: str, error: str) -> dict:
+        updated_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET excel_sync_error = ?,
+                    updated_at = ?
+                WHERE id = ? AND employee_username = ?
+                """,
+                (error[:500], updated_at, entry_id, employee_username),
+            )
+            row = connection.execute(
+                "SELECT * FROM sales_entries WHERE id = ? AND employee_username = ?",
+                (entry_id, employee_username),
+            ).fetchone()
+        updated = _normalize_sales_row(row)
+        if updated is None:
+            raise ValueError("Sales entry could not be found.")
+        return updated
+
+    def shift_sales_excel_rows_after(self, deleted_excel_row: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET excel_row = excel_row - 1
+                WHERE excel_row > ?
+                """,
+                (deleted_excel_row,),
+            )
+
+    def purge_old_synced_sales_entries(self, employee_username: str, cutoff_date: str) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM sales_entries
+                WHERE employee_username = ?
+                  AND entry_date < ?
+                  AND excel_synced_at <> ''
+                """,
+                (employee_username, cutoff_date),
+            )
+        return int(cursor.rowcount)
 
     def delete_sales_entry(self, entry_id: int, employee_username: str) -> None:
         with self.connect() as connection:
