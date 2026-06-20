@@ -18,6 +18,7 @@ class ExcelSyncResult:
     saved: bool
     row: int | None = None
     message: str = ""
+    blocked: bool = False
 
 
 class SalesWorkbook:
@@ -279,7 +280,7 @@ class SalesWorkbook:
         if self._customer_exists(customers, customer):
             return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
         if len(customers) >= limit:
-            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit))
+            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit), blocked=True)
 
         customers.append(customer)
         sheet.cell(row=row, column=1).value = ", ".join(customers)
@@ -472,7 +473,7 @@ class SalesWorkbook:
         if self._customer_exists(customers, customer):
             return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
         if len(customers) >= limit:
-            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit))
+            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit), blocked=True)
 
         customers.append(customer)
         sheet.Cells(row, 1).Value = ", ".join(customers)

@@ -20,6 +20,7 @@ from app.config import (
     NAVY,
     NAVY_LIGHT,
     SALES_FIELDS,
+    SALES_SERVICE_NAMES,
     SIDEBAR_ACTIVE,
     SIDEBAR_ACTIVE_TEXT,
     SIDEBAR_BG,
@@ -84,6 +85,16 @@ class DashboardPage(tk.Frame):
         self.sales_date_var = tk.StringVar()
         self.item_other_var = tk.StringVar()
         self.status_other_var = tk.StringVar()
+        self.message_filter_var = tk.StringVar(value="All Services")
+        self.service_message_templates: list[dict] = []
+        self.selected_message_template_id: int | None = None
+        self.message_filter_combo: ttk.Combobox | None = None
+        self.message_template_tree: ttk.Treeview | None = None
+        self.message_preview_text: tk.Text | None = None
+        self.message_detail_title_label: tk.Label | None = None
+        self.message_detail_meta_label: tk.Label | None = None
+        self.message_count_label: tk.Label | None = None
+        self.message_copy_status_label: tk.Label | None = None
         self.sales_entries: list[dict[str, str]] = []
         self.sales_selected_date = self._sales_date()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
@@ -192,6 +203,7 @@ class DashboardPage(tk.Frame):
         nav_items = [
             ("overview", "Dashboard"),
             ("attendance", "Attendance"),
+            ("messages", "Client Messages"),
             ("sales", "Sold Item Entry"),
             ("today", "5-Day Data"),
         ]
@@ -268,6 +280,7 @@ class DashboardPage(tk.Frame):
 
         self.views["overview"] = self._build_overview_view()
         self.views["attendance"] = self._build_attendance_view()
+        self.views["messages"] = self._build_messages_view()
         self.views["sales"] = self._build_sales_view()
         self.views["today"] = self._build_today_view()
         self.show_view("overview")
@@ -437,6 +450,124 @@ class DashboardPage(tk.Frame):
         self.attendance_tree.column("event", width=160, anchor="w")
         self.attendance_tree.column("details", width=520, anchor="w")
         self.attendance_tree.grid(row=1, column=0, sticky="nsew")
+        return view
+
+    def _build_messages_view(self) -> tk.Frame:
+        view = tk.Frame(self.content, bg=BG)
+        view.grid_columnconfigure(0, weight=1)
+        view.grid_rowconfigure(1, weight=1)
+
+        banner = GradientBanner(
+            view,
+            "Client Messages",
+            "Copy approved service message formats for Capcut, Adobe, VPN, and other client replies.",
+            height=118,
+            start=NAVY,
+            end=BLUE,
+        )
+        banner.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+
+        workspace = tk.Frame(view, bg=BG)
+        workspace.grid(row=1, column=0, sticky="nsew")
+        workspace.grid_columnconfigure(0, weight=2)
+        workspace.grid_columnconfigure(1, weight=3)
+        workspace.grid_rowconfigure(0, weight=1)
+
+        list_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=BLUE, accent_end=TEAL)
+        list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        list_body = list_card.body
+        list_body.grid_columnconfigure(0, weight=1)
+        list_body.grid_rowconfigure(3, weight=1)
+
+        tk.Label(list_body, text="Message Library", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        self.message_count_label = tk.Label(list_body, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.message_count_label.grid(row=1, column=0, sticky="w", pady=(0, 14))
+
+        filter_row = tk.Frame(list_body, bg=WHITE)
+        filter_row.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        filter_row.grid_columnconfigure(1, weight=1)
+        tk.Label(filter_row, text="Service", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
+        )
+        self.message_filter_combo = ttk.Combobox(
+            filter_row,
+            values=["All Services", *SALES_SERVICE_NAMES],
+            textvariable=self.message_filter_var,
+            state="readonly",
+            font=(FONT, 10),
+        )
+        self.message_filter_combo.grid(row=0, column=1, sticky="ew", ipady=5)
+        self.message_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_message_template_list())
+        make_button(filter_row, "Refresh", self._refresh_service_message_templates, "light").grid(
+            row=0, column=2, sticky="e", padx=(10, 0)
+        )
+
+        self.message_template_tree = ttk.Treeview(
+            list_body,
+            columns=("service", "updated"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.message_template_tree.heading("service", text="Service", anchor="w")
+        self.message_template_tree.heading("updated", text="Updated", anchor="w")
+        self.message_template_tree.column("service", width=300, minwidth=220, anchor="w", stretch=True)
+        self.message_template_tree.column("updated", width=145, minwidth=130, anchor="w", stretch=False)
+        self.message_template_tree.tag_configure("message_even", background=WHITE, foreground=TEXT)
+        self.message_template_tree.tag_configure("message_odd", background="#f8fbff", foreground=TEXT)
+        self.message_template_tree.grid(row=3, column=0, sticky="nsew")
+        self.message_template_tree.bind("<<TreeviewSelect>>", self._on_message_template_selected)
+
+        list_scroll = ttk.Scrollbar(list_body, orient="vertical", command=self.message_template_tree.yview)
+        list_scroll.grid(row=3, column=1, sticky="ns")
+        self.message_template_tree.configure(yscrollcommand=list_scroll.set)
+
+        preview_card = SurfaceCard(workspace, padx=22, pady=20, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        preview_card.grid(row=0, column=1, sticky="nsew")
+        preview = preview_card.body
+        preview.grid_columnconfigure(0, weight=1)
+        preview.grid_rowconfigure(2, weight=1)
+
+        self.message_detail_title_label = tk.Label(
+            preview,
+            text="Select a service",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+            justify="left",
+            wraplength=520,
+        )
+        self.message_detail_title_label.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.message_detail_meta_label = tk.Label(preview, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.message_detail_meta_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 14))
+
+        self.message_preview_text = tk.Text(
+            preview,
+            bg="#fbfdff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            font=(FONT, 11),
+            wrap="word",
+            padx=12,
+            pady=12,
+        )
+        self.message_preview_text.grid(row=2, column=0, sticky="nsew")
+        self.message_preview_text.configure(state="disabled")
+        preview_scroll = ttk.Scrollbar(preview, orient="vertical", command=self.message_preview_text.yview)
+        preview_scroll.grid(row=2, column=1, sticky="ns")
+        self.message_preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        actions = tk.Frame(preview, bg=WHITE)
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        actions.grid_columnconfigure(1, weight=1)
+        make_button(actions, "Copy Message", self.copy_selected_message_template, "primary").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.message_copy_status_label = tk.Label(actions, text="", bg=WHITE, fg=SUCCESS, font=(FONT_BOLD, 10))
+        self.message_copy_status_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
         return view
 
     def _build_sales_view(self) -> tk.Frame:
@@ -855,9 +986,12 @@ class DashboardPage(tk.Frame):
                 break
         return item
 
+    def _remove_sales_entry_cache(self, entry_id: str) -> None:
+        self.sales_entries = [entry for entry in self.sales_entries if str(entry.get("id", "")) != entry_id]
+
     def _refresh_sales_entries_from_store(self) -> None:
         visible_dates = self._sales_visible_dates()
-        self.app.attendance_store.purge_old_synced_sales_entries(self._employee_username(), visible_dates[0])
+        self.app.attendance_store.delete_blocked_sales_entries(self._employee_username())
         if self.sales_selected_date not in visible_dates:
             self.sales_selected_date = visible_dates[-1]
         entries = []
@@ -881,6 +1015,130 @@ class DashboardPage(tk.Frame):
         self._refresh_sales_day_cards()
         self._refresh_selected_sales_day_header()
         self._refresh_today_table()
+
+    def _refresh_service_message_templates(self) -> None:
+        self.service_message_templates = self.app.attendance_store.list_service_message_templates(limit=300)
+        self._refresh_message_filter_values()
+        self._refresh_message_template_list()
+
+    def _refresh_message_filter_values(self) -> None:
+        if self.message_filter_combo is None:
+            return
+        services = sorted(
+            {template["service_name"] for template in self.service_message_templates if template["service_name"]},
+            key=str.lower,
+        )
+        values = ["All Services", *services]
+        if self.message_filter_var.get() not in values:
+            self.message_filter_var.set("All Services")
+        self.message_filter_combo.configure(values=values)
+
+    def _filtered_message_templates(self) -> list[dict]:
+        selected_service = self.message_filter_var.get()
+        if not selected_service or selected_service == "All Services":
+            return list(self.service_message_templates)
+        return [
+            template
+            for template in self.service_message_templates
+            if template["service_name"] == selected_service
+        ]
+
+    def _refresh_message_template_list(self) -> None:
+        if self.message_template_tree is None:
+            return
+        for item in self.message_template_tree.get_children():
+            self.message_template_tree.delete(item)
+        templates = self._filtered_message_templates()
+        if self.message_count_label is not None:
+            total = len(self.service_message_templates)
+            visible = len(templates)
+            total_label = "service message" if total == 1 else "service messages"
+            visible_label = "service message" if visible == 1 else "service messages"
+            if total == visible:
+                self.message_count_label.configure(text=f"{visible} active {visible_label} available")
+            else:
+                self.message_count_label.configure(text=f"{visible} of {total} {total_label} shown")
+
+        valid_ids: set[int] = set()
+        first_id: int | None = None
+        for index, template in enumerate(templates):
+            template_id = int(template["id"])
+            valid_ids.add(template_id)
+            if first_id is None:
+                first_id = template_id
+            tag = "message_even" if index % 2 == 0 else "message_odd"
+            self.message_template_tree.insert(
+                "",
+                "end",
+                iid=str(template_id),
+                tags=(tag,),
+                values=(template["service_name"], self._format_template_time(template["updated_at"])),
+            )
+
+        if self.selected_message_template_id in valid_ids:
+            selected = self.selected_message_template_id
+        else:
+            selected = first_id
+            self.selected_message_template_id = selected
+
+        if selected is not None:
+            self.message_template_tree.selection_set(str(selected))
+            self.message_template_tree.focus(str(selected))
+            self._set_message_template_preview(self._message_template_by_id(selected))
+            return
+        self._set_message_template_preview(None)
+
+    def _on_message_template_selected(self, _event: tk.Event) -> None:
+        if self.message_template_tree is None:
+            return
+        selection = self.message_template_tree.selection()
+        self.selected_message_template_id = int(selection[0]) if selection else None
+        self._set_message_template_preview(self._message_template_by_id(self.selected_message_template_id))
+
+    def _message_template_by_id(self, template_id: int | None) -> dict | None:
+        if template_id is None:
+            return None
+        for template in self.service_message_templates:
+            if int(template["id"]) == template_id:
+                return template
+        return None
+
+    def _set_message_template_preview(self, template: dict | None) -> None:
+        if (
+            self.message_preview_text is None
+            or self.message_detail_title_label is None
+            or self.message_detail_meta_label is None
+        ):
+            return
+        self.message_preview_text.configure(state="normal")
+        self.message_preview_text.delete("1.0", tk.END)
+        if template is None:
+            self.message_detail_title_label.configure(text="No service selected")
+            if self.service_message_templates:
+                self.message_detail_meta_label.configure(text="Choose a service from the library.")
+            else:
+                self.message_detail_meta_label.configure(text="No active service messages have been published yet.")
+            self.message_preview_text.insert("1.0", "Published service messages will appear here.")
+        else:
+            self.message_detail_title_label.configure(text=template["service_name"])
+            self.message_detail_meta_label.configure(
+                text=f"Updated {self._format_template_time(template['updated_at'])}"
+            )
+            self.message_preview_text.insert("1.0", template["message"])
+        self.message_preview_text.configure(state="disabled")
+        if self.message_copy_status_label is not None:
+            self.message_copy_status_label.configure(text="")
+
+    def copy_selected_message_template(self) -> None:
+        template = self._message_template_by_id(self.selected_message_template_id)
+        if template is None:
+            messagebox.showinfo("No service selected", "Select a service message first.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(template["message"])
+        self.update()
+        if self.message_copy_status_label is not None:
+            self.message_copy_status_label.configure(text="Copied to clipboard")
 
     def _refresh_sales_day_cards(self) -> None:
         visible_dates = self._sales_visible_dates()
@@ -930,6 +1188,12 @@ class DashboardPage(tk.Frame):
     def _format_event_time(self, value: str) -> str:
         try:
             return datetime.fromisoformat(value).strftime("%I:%M %p")
+        except ValueError:
+            return value
+
+    def _format_template_time(self, value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).strftime("%d %b %Y, %I:%M %p")
         except ValueError:
             return value
 
@@ -1045,6 +1309,7 @@ class DashboardPage(tk.Frame):
         self._sync_attendance_state()
         self.sales_date_var.set(self._sales_date_display())
         self._refresh_sales_entries_from_store()
+        self._refresh_service_message_templates()
         self.user_label.configure(text=f"Signed in as {self.app.display_user}")
         self.welcome_banner.set_text(
             f"Welcome, {self.app.display_user}",
@@ -1105,11 +1370,19 @@ class DashboardPage(tk.Frame):
     def _sales_entry_sync_state(self, entry: dict[str, str]) -> tuple[str, str]:
         if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:
             return "Syncing", BLUE
+        if self._is_blocked_excel_sync_message(entry.get("excel_sync_error", "")):
+            return "Not saved", WARNING
         if not entry.get("excel_synced_at") and entry.get("excel_sync_error"):
             return "Retry needed", WARNING
         if entry.get("excel_synced_at"):
             return "Synced", SUCCESS
         return "Saved", MUTED
+
+    def _is_blocked_excel_sync_message(self, message: object) -> bool:
+        return "account is full" in str(message or "").lower()
+
+    def _is_blocked_excel_sync_result(self, sync_result: ExcelSyncResult) -> bool:
+        return bool(getattr(sync_result, "blocked", False)) or self._is_blocked_excel_sync_message(sync_result.message)
 
     def _refresh_sales_sidebar(self, today_entries: list[dict[str, str]]) -> None:
         if self.excel_sync_status_label is not None:
@@ -1119,6 +1392,7 @@ class DashboardPage(tk.Frame):
                 for entry in self.sales_entries
                 if not entry.get("excel_synced_at")
                 and entry.get("excel_sync_error")
+                and not self._is_blocked_excel_sync_message(entry.get("excel_sync_error", ""))
                 and str(entry.get("id", "")) not in self.excel_sync_pending_entry_ids
             )
             if pending_count:
@@ -1260,6 +1534,8 @@ class DashboardPage(tk.Frame):
             return False
         if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:
             return False
+        if self._is_blocked_excel_sync_message(entry.get("excel_sync_error", "")):
+            return False
         return not entry.get("excel_synced_at") and bool(entry.get("excel_sync_error"))
 
     def _refresh_sync_retry_action(self) -> None:
@@ -1378,19 +1654,32 @@ class DashboardPage(tk.Frame):
                     messagebox.showinfo("Excel synced", "Data synced with Excel.")
             else:
                 message = sync_result.message or "Excel sync failed."
-                updated = self.app.attendance_store.mark_sales_excel_error(
-                    int(entry["id"]),
-                    self._employee_username(),
-                    message,
-                )
-                self._update_sales_entry_cache(updated)
-                self.last_saved_label.configure(
-                    text="Data saved locally. Excel sync failed; use Sync Again With Excel."
-                )
-                if "account is full" in message.lower():
+                if self._is_blocked_excel_sync_result(sync_result) and source != "edit":
+                    self.app.attendance_store.delete_sales_entry(int(entry["id"]), self._employee_username())
+                    self._remove_sales_entry_cache(entry_id)
+                    self.last_saved_label.configure(text="Account full. Data was not saved.")
                     messagebox.showwarning("Account full", message)
-                elif source in {"retry", "edit"}:
-                    messagebox.showwarning("Excel sync failed", f"Excel sync still failed:\n{message}")
+                elif self._is_blocked_excel_sync_result(sync_result):
+                    updated = self.app.attendance_store.mark_sales_excel_error(
+                        int(entry["id"]),
+                        self._employee_username(),
+                        message,
+                    )
+                    self._update_sales_entry_cache(updated)
+                    self.last_saved_label.configure(text="Excel update blocked. Use a new account email.")
+                    messagebox.showwarning("Account full", message)
+                else:
+                    updated = self.app.attendance_store.mark_sales_excel_error(
+                        int(entry["id"]),
+                        self._employee_username(),
+                        message,
+                    )
+                    self._update_sales_entry_cache(updated)
+                    self.last_saved_label.configure(
+                        text="Data saved locally. Excel sync failed; use Sync Again With Excel."
+                    )
+                    if source in {"retry", "edit"}:
+                        messagebox.showwarning("Excel sync failed", f"Excel sync still failed:\n{message}")
         finally:
             self.refresh_all()
             self._start_next_excel_sync()

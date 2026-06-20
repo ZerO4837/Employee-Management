@@ -42,6 +42,7 @@ This first version builds a polished, modular UI and local screen flow:
 - Break start / end
 - Admin attendance sheet with shift summaries and event timeline
 - Admin-to-employee announcements
+- Admin-managed client message templates for services such as Capcut, Adobe, and VPN
 - Admin sales workbook target settings
 - Sold item entry form matching the owner workbook columns
 - Numeric-only buying and selling amount fields
@@ -96,9 +97,13 @@ The employee app keeps a rolling 5-day local sales view:
 - The Sold Item Entry page shows today's count only.
 - The 5-Day Data page shows one clickable date card for each of the last 5 calendar days.
 - Clicking a date card opens only that date's entries in the table.
-- Synced local entries older than the 5-day window are removed from the local view/database.
+- Synced local entries older than the 5-day employee window stay in the local database for admin month views.
 - Unsynced old entries are kept locally to avoid losing sales if Excel sync failed.
 - Excel remains the main permanent sales record.
+
+The admin panel has a `Sales Data` tab that shows sales records across employees, including totals and Excel sync status. Admin can switch between `Last 5 Days` and current-year month sections such as `January Sales`, `February Sales`, and so on. These month choices reset naturally when the year changes.
+
+If Excel reports that a Netflix/HBO screen account is already full, the app removes that unsynced local retry row instead of keeping it as `Retry needed`.
 
 To connect your real OneDrive workbook, set this environment variable before starting the app:
 
@@ -194,6 +199,12 @@ Employee notifications appear in the header notification control:
 - The admin send action uses a branded in-app alert instead of a native Windows popup.
 
 For now, announcements are saved locally in SQLite. When Supabase is connected later, this same feature can sync between your PC and the employee PC.
+
+## Client Message Templates
+
+The admin panel includes a Service Messages section for approved, pre-formatted client replies. Each saved message uses the service/category as its label and keeps the full message body. Emoji, line breaks, links, and spacing are saved as typed. Existing service messages can be edited or deactivated from the same panel.
+
+The employee dashboard includes a Client Messages view where active service messages can be filtered by service, previewed, and copied to the clipboard for sending to clients.
 
 ## Owner App / Employee App Direction
 

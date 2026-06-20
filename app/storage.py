@@ -175,6 +175,20 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS service_message_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    service_name TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS sales_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     employee_username TEXT NOT NULL,
@@ -241,6 +255,12 @@ class AttendanceStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_app_settings_lookup
                 ON app_settings (setting_key)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_service_message_templates_active
+                ON service_message_templates (is_active, service_name, updated_at)
                 """
             )
             connection.execute(
@@ -744,6 +764,123 @@ class AttendanceStore:
                 [(announcement_id, employee_username, read_at) for announcement_id in announcement_ids],
             )
 
+    def create_service_message_template(
+        self,
+        service_name: str,
+        message: str,
+        created_by: str,
+    ) -> dict:
+        created_at = _iso()
+        service_name = service_name.strip()
+        message = message.strip()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET is_active = 0,
+                    updated_at = ?
+                WHERE is_active = 1
+                    AND LOWER(service_name) = LOWER(?)
+                """,
+                (created_at, service_name),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO service_message_templates
+                (service_name, title, message, created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (service_name, service_name, message, created_by, created_at, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM service_message_templates WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Failed to create service message template.")
+        return created
+
+    def update_service_message_template(self, template_id: int, service_name: str, message: str) -> dict:
+        updated_at = _iso()
+        service_name = service_name.strip()
+        message = message.strip()
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM service_message_templates
+                WHERE id = ? AND is_active = 1
+                """,
+                (template_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("Service message could not be found.")
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET is_active = 0,
+                    updated_at = ?
+                WHERE is_active = 1
+                    AND id <> ?
+                    AND LOWER(service_name) = LOWER(?)
+                """,
+                (updated_at, template_id, service_name),
+            )
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET service_name = ?,
+                    title = ?,
+                    message = ?,
+                    updated_at = ?
+                WHERE id = ? AND is_active = 1
+                """,
+                (service_name, service_name, message, updated_at, template_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM service_message_templates WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise RuntimeError("Failed to update service message template.")
+        return updated
+
+    def list_service_message_templates(self, limit: int = 200, active_only: bool = True) -> list[dict]:
+        with self.connect() as connection:
+            if active_only:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM service_message_templates
+                    WHERE is_active = 1
+                    ORDER BY service_name COLLATE NOCASE ASC, updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM service_message_templates
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def deactivate_service_message_template(self, template_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET is_active = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (_iso(), template_id),
+            )
+
     def list_sales_entries(self, employee_username: str, entry_date: str | None = None) -> list[dict]:
         entry_date = entry_date or _today()
         with self.connect() as connection:
@@ -754,6 +891,29 @@ class AttendanceStore:
                 ORDER BY id ASC
                 """,
                 (employee_username, entry_date),
+            ).fetchall()
+        return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
+
+    def list_sales_entries_between(
+        self,
+        start_date: str,
+        end_date: str,
+        employee_username: str | None = None,
+    ) -> list[dict]:
+        params: list[str] = [start_date, end_date]
+        employee_filter = ""
+        if employee_username:
+            employee_filter = "AND employee_username = ?"
+            params.append(employee_username)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM sales_entries
+                WHERE entry_date BETWEEN ? AND ?
+                {employee_filter}
+                ORDER BY entry_date DESC, id DESC
+                """,
+                tuple(params),
             ).fetchall()
         return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
 
@@ -929,6 +1089,24 @@ class AttendanceStore:
                   AND excel_synced_at <> ''
                 """,
                 (employee_username, cutoff_date),
+            )
+        return int(cursor.rowcount)
+
+    def delete_blocked_sales_entries(self, employee_username: str | None = None) -> int:
+        params: list[str] = []
+        employee_filter = ""
+        if employee_username:
+            employee_filter = "AND employee_username = ?"
+            params.append(employee_username)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"""
+                DELETE FROM sales_entries
+                WHERE excel_synced_at = ''
+                  AND LOWER(excel_sync_error) LIKE '%account is full%'
+                  {employee_filter}
+                """,
+                tuple(params),
             )
         return int(cursor.rowcount)
 
