@@ -38,6 +38,12 @@ class SalesWorkbook:
         "Date",
     )
     ENTRY_DATA_COLUMNS = (1, 2, 3, 4, 5, 7)
+    SCREEN_SERVICE_LIMITS = {
+        "netflix screen": 5,
+        "netflix screens": 5,
+        "hbo max screen": 9,
+        "hbo max screens": 9,
+    }
 
     def __init__(self, path: Path | str = SALES_WORKBOOK_PATH, worksheet_name: str = SALES_WORKSHEET_NAME) -> None:
         self.target = os.path.expandvars(str(path)).strip()
@@ -65,6 +71,12 @@ class SalesWorkbook:
             matched_retry_row = False
             workbook, sheet = self._open_workbook()
             self._ensure_headers(sheet)
+            screen_result = self._sync_screen_entry(sheet, entry)
+            if screen_result is not None:
+                if screen_result.saved:
+                    self._request_formula_recalculation(workbook)
+                    self._save_workbook(workbook)
+                return screen_result
             if row is not None and (row > sheet.max_row or not self._row_identity_matches_entry(sheet, row, entry)):
                 row = None
             if row is None:
@@ -173,6 +185,111 @@ class SalesWorkbook:
             return f"{float(converted):.6f}".rstrip("0").rstrip(".")
         return self._text_key(converted)
 
+    def _screen_limit(self, entry: dict[str, Any]) -> int | None:
+        item_key = self._text_key(entry.get("item", ""))
+        return self.SCREEN_SERVICE_LIMITS.get(item_key)
+
+    def _customer_names(self, value: Any) -> list[str]:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        return [part.strip() for part in text.split(",") if part.strip()]
+
+    def _customer_exists(self, customers: list[str], customer: str) -> bool:
+        customer_key = self._text_key(customer)
+        return any(self._text_key(existing) == customer_key for existing in customers)
+
+    def _customer_index(self, customers: list[str], customer: str) -> int | None:
+        customer_key = self._text_key(customer)
+        for index, existing in enumerate(customers):
+            if self._text_key(existing) == customer_key:
+                return index
+        return None
+
+    def _replace_customer(self, customers: list[str], old_customer: str, new_customer: str) -> list[str] | None:
+        old_index = self._customer_index(customers, old_customer)
+        if old_index is None:
+            return None
+        new_index = self._customer_index(customers, new_customer)
+        if new_index is not None and new_index != old_index:
+            return [customer for index, customer in enumerate(customers) if index != old_index]
+        updated = list(customers)
+        updated[old_index] = new_customer
+        return updated
+
+    def _screen_full_message(self, entry: dict[str, Any], limit: int) -> str:
+        service = str(entry.get("item") or "This screen service").strip()
+        return f"{service} account is full ({limit} customers). Please use a new account email."
+
+    def _add_numbers(self, current: Any, added: Any) -> int | float | Any:
+        current_number = self._number_or_text(current)
+        added_number = self._number_or_text(added)
+        if self._is_blank(current) and isinstance(added_number, (int, float)):
+            return added_number
+        if not isinstance(current_number, (int, float)) or not isinstance(added_number, (int, float)):
+            return current
+        total = float(current_number) + float(added_number)
+        if total.is_integer():
+            return int(total)
+        return total
+
+    def _screen_row_matches_values(self, row_item: Any, row_order_id: Any, item: Any, order_id: Any) -> bool:
+        return (
+            self._text_key(row_item) == self._text_key(item)
+            and self._text_key(row_order_id) == self._text_key(order_id)
+        )
+
+    def _find_screen_row_for_values(self, sheet, item: Any, order_id: Any) -> int | None:
+        if not self._text_key(order_id):
+            return None
+        for row in range(max(sheet.max_row, 1), 1, -1):
+            if self._screen_row_matches_values(
+                sheet.cell(row=row, column=2).value,
+                sheet.cell(row=row, column=3).value,
+                item,
+                order_id,
+            ):
+                return row
+        return None
+
+    def _find_screen_row(self, sheet, entry: dict[str, Any]) -> int | None:
+        return self._find_screen_row_for_values(sheet, entry.get("item", ""), entry.get("order_id", ""))
+
+    def _sync_screen_entry(self, sheet, entry: dict[str, Any]) -> ExcelSyncResult | None:
+        limit = self._screen_limit(entry)
+        if limit is None:
+            return None
+        previous_customer = str(entry.get("previous_customer") or "").strip()
+        previous_item = entry.get("previous_item") or entry.get("item", "")
+        previous_order_id = entry.get("previous_order_id") or entry.get("order_id", "")
+        row = self._find_screen_row_for_values(sheet, previous_item, previous_order_id)
+        if row is None:
+            row = self._find_screen_row(sheet, entry)
+        if row is None:
+            return None
+
+        customer = str(entry.get("customer") or "").strip()
+        customers = self._customer_names(sheet.cell(row=row, column=1).value)
+        if previous_customer:
+            replaced = self._replace_customer(customers, previous_customer, customer)
+            if replaced is not None:
+                sheet.cell(row=row, column=1).value = ", ".join(replaced)
+                sheet.cell(row=row, column=6).value = f"=E{row}-D{row}"
+                return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
+        if self._customer_exists(customers, customer):
+            return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
+        if len(customers) >= limit:
+            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit))
+
+        customers.append(customer)
+        sheet.cell(row=row, column=1).value = ", ".join(customers)
+        sheet.cell(row=row, column=5).value = self._add_numbers(
+            sheet.cell(row=row, column=5).value,
+            entry.get("selling_amount", ""),
+        )
+        sheet.cell(row=row, column=6).value = f"=E{row}-D{row}"
+        return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
+
     def _prefer_excel_com(self) -> bool:
         return os.name == "nt" and (
             self.is_cloud_url or any("onedrive" in part.casefold() for part in self.path.parts)
@@ -211,6 +328,11 @@ class SalesWorkbook:
 
             sheet = self._select_com_sheet(workbook)
             self._ensure_com_headers(sheet)
+            screen_result = self._sync_screen_entry_com(sheet, entry)
+            if screen_result is not None:
+                if screen_result.saved:
+                    workbook.Save()
+                return screen_result
             row = self._existing_row(entry)
             matched_retry_row = False
             max_row, _ = self._com_used_bounds(sheet)
@@ -308,6 +430,55 @@ class SalesWorkbook:
             self._text_key(sheet.Cells(row, column).Value) == self._text_key(entry.get(key, ""))
             for column, key in ((1, "customer"), (2, "item"), (3, "order_id"))
         )
+
+    def _find_screen_row_com_for_values(self, sheet, item: Any, order_id: Any) -> int | None:
+        if not self._text_key(order_id):
+            return None
+        max_row, _ = self._com_used_bounds(sheet)
+        for row in range(max(max_row, 1), 1, -1):
+            if self._screen_row_matches_values(
+                sheet.Cells(row, 2).Value,
+                sheet.Cells(row, 3).Value,
+                item,
+                order_id,
+            ):
+                return row
+        return None
+
+    def _find_screen_row_com(self, sheet, entry: dict[str, Any]) -> int | None:
+        return self._find_screen_row_com_for_values(sheet, entry.get("item", ""), entry.get("order_id", ""))
+
+    def _sync_screen_entry_com(self, sheet, entry: dict[str, Any]) -> ExcelSyncResult | None:
+        limit = self._screen_limit(entry)
+        if limit is None:
+            return None
+        previous_customer = str(entry.get("previous_customer") or "").strip()
+        previous_item = entry.get("previous_item") or entry.get("item", "")
+        previous_order_id = entry.get("previous_order_id") or entry.get("order_id", "")
+        row = self._find_screen_row_com_for_values(sheet, previous_item, previous_order_id)
+        if row is None:
+            row = self._find_screen_row_com(sheet, entry)
+        if row is None:
+            return None
+
+        customer = str(entry.get("customer") or "").strip()
+        customers = self._customer_names(sheet.Cells(row, 1).Value)
+        if previous_customer:
+            replaced = self._replace_customer(customers, previous_customer, customer)
+            if replaced is not None:
+                sheet.Cells(row, 1).Value = ", ".join(replaced)
+                sheet.Cells(row, 6).Formula = f"=E{row}-D{row}"
+                return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
+        if self._customer_exists(customers, customer):
+            return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
+        if len(customers) >= limit:
+            return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit))
+
+        customers.append(customer)
+        sheet.Cells(row, 1).Value = ", ".join(customers)
+        sheet.Cells(row, 5).Value = self._add_numbers(sheet.Cells(row, 5).Value, entry.get("selling_amount", ""))
+        sheet.Cells(row, 6).Formula = f"=E{row}-D{row}"
+        return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
 
     def _com_row_matches_entry(self, sheet, row: int, entry: dict[str, Any]) -> bool:
         comparisons = (

@@ -82,13 +82,16 @@ class DashboardPage(tk.Frame):
         self.views: dict[str, tk.Frame] = {}
         self.sales_vars: dict[str, tk.StringVar] = {}
         self.sales_date_var = tk.StringVar()
+        self.item_other_var = tk.StringVar()
         self.status_other_var = tk.StringVar()
         self.sales_entries: list[dict[str, str]] = []
         self.sales_selected_date = self._sales_date()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
         self.sync_retry_button: tk.Button | None = None
         self.excel_sync_status_label: tk.Label | None = None
+        self.sales_recent_canvas: tk.Canvas | None = None
         self.sales_recent_frame: tk.Frame | None = None
+        self.sales_recent_window: int | None = None
         self.excel_sync_queue: list[tuple[dict[str, str], str, int | None]] = []
         self.excel_sync_results: queue.Queue[tuple[dict[str, str], str, int | None, ExcelSyncResult]] = queue.Queue()
         self.excel_sync_busy = False
@@ -117,6 +120,7 @@ class DashboardPage(tk.Frame):
         self.close_first_shift_buttons: list[tk.Button] = []
         self.shift_required_buttons: list[tk.Button] = []
         self.sales_input_widgets: list[tk.Widget] = []
+        self.item_other_widgets: list[tk.Widget] = []
         self.status_other_widgets: list[tk.Widget] = []
         self.notification_button: tk.Button | None = None
         self.notification_badge: tk.Label | None = None
@@ -465,14 +469,15 @@ class DashboardPage(tk.Frame):
             self._sales_field(form, key, label, row, column, kind, values)
 
         self._sales_date_field(form, row + 2, 0)
-        self._status_other_field(form, row + 2, 1)
+        self._item_other_field(form, row + 2, 1)
+        self._status_other_field(form, row + 4, 1)
 
         self.submit_sales_button = make_button(form, "Save Entry", self.submit_sales_entry, "primary")
-        self.submit_sales_button.grid(row=row + 4, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
+        self.submit_sales_button.grid(row=row + 6, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
         self.shift_required_buttons.append(self.submit_sales_button)
 
         clear_form_button = make_button(form, "Clear Form", self.clear_sales_form, "light")
-        clear_form_button.grid(row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        clear_form_button.grid(row=row + 6, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         self.shift_required_buttons.append(clear_form_button)
 
         side_card = SurfaceCard(view, padx=20, pady=20, accent=True, accent_start=SUCCESS, accent_end=TEAL)
@@ -508,9 +513,33 @@ class DashboardPage(tk.Frame):
         tk.Label(side, text="Latest Entries", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(
             row=6, column=0, sticky="w", pady=(22, 8)
         )
-        self.sales_recent_frame = tk.Frame(side, bg=WHITE)
-        self.sales_recent_frame.grid(row=7, column=0, sticky="nsew")
+        recent_container = tk.Frame(side, bg=WHITE)
+        recent_container.grid(row=7, column=0, sticky="nsew")
+        recent_container.grid_rowconfigure(0, weight=1)
+        recent_container.grid_columnconfigure(0, weight=1)
+        self.sales_recent_canvas = tk.Canvas(
+            recent_container,
+            bg=WHITE,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=LINE,
+            height=220,
+        )
+        self.sales_recent_canvas.grid(row=0, column=0, sticky="nsew")
+        recent_scrollbar = ttk.Scrollbar(recent_container, orient="vertical", command=self.sales_recent_canvas.yview)
+        recent_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.sales_recent_canvas.configure(yscrollcommand=recent_scrollbar.set)
+        self.sales_recent_frame = tk.Frame(self.sales_recent_canvas, bg=WHITE, padx=10, pady=10)
+        self.sales_recent_window = self.sales_recent_canvas.create_window(
+            (0, 0),
+            window=self.sales_recent_frame,
+            anchor="nw",
+        )
         self.sales_recent_frame.grid_columnconfigure(0, weight=1)
+        self.sales_recent_frame.bind("<Configure>", self._update_sales_recent_scrollregion)
+        self.sales_recent_frame.bind("<MouseWheel>", self._scroll_sales_recent_entries)
+        self.sales_recent_canvas.bind("<Configure>", self._resize_sales_recent_window)
+        self.sales_recent_canvas.bind("<MouseWheel>", self._scroll_sales_recent_entries)
         side.grid_rowconfigure(7, weight=1)
 
         open_today_button = make_button(side, "Open 5-Day Data", lambda: self.show_view("today"), "light")
@@ -668,6 +697,8 @@ class DashboardPage(tk.Frame):
         if kind == "combo" and values:
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
+            if key == "item":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_item_other_visibility())
             if key == "status":
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
             self.sales_input_widgets.append(widget)
@@ -701,6 +732,24 @@ class DashboardPage(tk.Frame):
         self.sales_input_widgets.append(widget)
         self._update_status_other_visibility()
 
+    def _item_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        padx = (12, 0)
+        label = field_label(parent, "Other Service Name")
+        label.grid(row=row, column=column, sticky="w", padx=padx)
+        widget = text_entry(parent, self.item_other_var)
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+        self.item_other_widgets = [label, widget]
+        self.sales_input_widgets.append(widget)
+        self._update_item_other_visibility()
+
+    def _update_item_other_visibility(self) -> None:
+        show_other = self.sales_vars.get("item") is not None and self.sales_vars["item"].get() == "Other"
+        for widget in self.item_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
     def _update_status_other_visibility(self) -> None:
         show_other = self.sales_vars.get("status") is not None and self.sales_vars["status"].get() == "Other"
         for widget in self.status_other_widgets:
@@ -714,6 +763,12 @@ class DashboardPage(tk.Frame):
             status = other_reason.strip()
             return status or None
         return selected_status or "Done"
+
+    def _resolved_item(self, selected_item: str, other_item: str) -> str | None:
+        if selected_item == "Other":
+            item = other_item.strip()
+            return item or None
+        return selected_item.strip() or None
 
     def _require_shift_active(self) -> bool:
         if self.checked_in:
@@ -905,6 +960,7 @@ class DashboardPage(tk.Frame):
                 widget.configure(state="normal" if enabled else "disabled")
             else:
                 widget.configure(state="normal" if enabled else "disabled")
+        self._update_item_other_visibility()
         self._update_status_other_visibility()
 
     def _apply_access_state(self) -> None:
@@ -1081,9 +1137,9 @@ class DashboardPage(tk.Frame):
         for child in self.sales_recent_frame.winfo_children():
             child.destroy()
 
-        latest_entries = today_entries[-5:][::-1]
+        latest_entries = today_entries[::-1]
         if not latest_entries:
-            tk.Label(
+            empty_label = tk.Label(
                 self.sales_recent_frame,
                 text="No entries yet today.",
                 bg=WHITE,
@@ -1091,7 +1147,9 @@ class DashboardPage(tk.Frame):
                 font=(FONT, 10),
                 wraplength=240,
                 justify="left",
-            ).grid(row=0, column=0, sticky="w")
+            )
+            empty_label.grid(row=0, column=0, sticky="w")
+            empty_label.bind("<MouseWheel>", self._scroll_sales_recent_entries)
             return
 
         for index, entry in enumerate(latest_entries):
@@ -1118,13 +1176,36 @@ class DashboardPage(tk.Frame):
                 justify="left",
             )
             meta.grid(row=index * 3 + 1, column=0, sticky="w")
+            title.bind("<MouseWheel>", self._scroll_sales_recent_entries)
+            meta.bind("<MouseWheel>", self._scroll_sales_recent_entries)
             if index < len(latest_entries) - 1:
-                tk.Frame(self.sales_recent_frame, bg=LINE, height=1).grid(
+                divider = tk.Frame(self.sales_recent_frame, bg=LINE, height=1)
+                divider.grid(
                     row=index * 3 + 2,
                     column=0,
                     sticky="ew",
                     pady=(8, 0),
                 )
+                divider.bind("<MouseWheel>", self._scroll_sales_recent_entries)
+        if self.sales_recent_canvas is not None:
+            self.sales_recent_canvas.yview_moveto(0)
+
+    def _update_sales_recent_scrollregion(self, _event: tk.Event | None = None) -> None:
+        if self.sales_recent_canvas is None:
+            return
+        self.sales_recent_canvas.configure(scrollregion=self.sales_recent_canvas.bbox("all") or (0, 0, 0, 0))
+
+    def _resize_sales_recent_window(self, event: tk.Event) -> None:
+        if self.sales_recent_canvas is None or self.sales_recent_window is None:
+            return
+        self.sales_recent_canvas.itemconfigure(self.sales_recent_window, width=max(event.width - 4, 1))
+
+    def _scroll_sales_recent_entries(self, event: tk.Event) -> str:
+        if self.sales_recent_canvas is None:
+            return "break"
+        direction = -1 if event.delta > 0 else 1
+        self.sales_recent_canvas.yview_scroll(direction, "units")
+        return "break"
 
     def _refresh_attendance_log(self) -> None:
         self.attendance_events = self.app.attendance_store.list_employee_events(self._employee_username())
@@ -1306,7 +1387,9 @@ class DashboardPage(tk.Frame):
                 self.last_saved_label.configure(
                     text="Data saved locally. Excel sync failed; use Sync Again With Excel."
                 )
-                if source in {"retry", "edit"}:
+                if "account is full" in message.lower():
+                    messagebox.showwarning("Account full", message)
+                elif source in {"retry", "edit"}:
                     messagebox.showwarning("Excel sync failed", f"Excel sync still failed:\n{message}")
         finally:
             self.refresh_all()
@@ -1482,14 +1565,20 @@ class DashboardPage(tk.Frame):
     def clear_sales_form(self) -> None:
         if not self._require_shift_active():
             return
+        selected_item = self.sales_vars.get("item").get() if self.sales_vars.get("item") is not None else ""
+        other_item = self.item_other_var.get()
         for key, variable in self.sales_vars.items():
             if key == "buying_amount":
                 variable.set("0")
             elif key == "status":
                 variable.set("Done")
+            elif key == "item":
+                variable.set(selected_item)
             else:
                 variable.set("")
+        self.item_other_var.set(other_item)
         self.status_other_var.set("")
+        self._update_item_other_visibility()
         self._update_status_other_visibility()
 
     def submit_sales_entry(self) -> None:
@@ -1500,9 +1589,11 @@ class DashboardPage(tk.Frame):
         if not entry["customer"]:
             messagebox.showerror("Missing customer", "Customer Name is required.")
             return
-        if not entry["item"]:
+        resolved_item = self._resolved_item(entry["item"], self.item_other_var.get())
+        if resolved_item is None:
             messagebox.showerror("Missing item", "Items Sold is required.")
             return
+        entry["item"] = resolved_item
         if not entry["buying_amount"]:
             entry["buying_amount"] = "0"
         if not entry["selling_amount"]:
@@ -1576,6 +1667,8 @@ class EditEntryWindow(tk.Toplevel):
         self._set_window_icon()
         self.grab_set()
         self.vars: dict[str, tk.StringVar] = {}
+        self.item_other_var = tk.StringVar()
+        self.item_other_widgets: list[tk.Widget] = []
         self.status_other_var = tk.StringVar()
         self.status_other_widgets: list[tk.Widget] = []
         self._build()
@@ -1603,10 +1696,11 @@ class EditEntryWindow(tk.Toplevel):
                 row += 2
             self._field(body, key, label, row, column, kind, values)
 
-        self._status_other_field(body, row + 2, 0)
+        self._item_other_field(body, row + 2, 1)
+        self._status_other_field(body, row + 4, 0)
 
-        make_button(body, "Save Changes", self.save, "primary").grid(row=row + 4, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
-        make_button(body, "Cancel", self.destroy, "light").grid(row=row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        make_button(body, "Save Changes", self.save, "primary").grid(row=row + 6, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
+        make_button(body, "Cancel", self.destroy, "light").grid(row=row + 6, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
     def _field(
         self,
@@ -1619,7 +1713,10 @@ class EditEntryWindow(tk.Toplevel):
         values: list[str] | None,
     ) -> None:
         value = self.entry.get(key, "")
-        if key == "status" and values and value not in values:
+        if key == "item" and values and value not in values:
+            variable = tk.StringVar(value="Other")
+            self.item_other_var.set(value)
+        elif key == "status" and values and value not in values:
             variable = tk.StringVar(value="Other")
             self.status_other_var.set(value)
         else:
@@ -1630,6 +1727,8 @@ class EditEntryWindow(tk.Toplevel):
         if kind == "combo" and values:
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
+            if key == "item":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_item_other_visibility())
             if key == "status":
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
             return
@@ -1659,6 +1758,23 @@ class EditEntryWindow(tk.Toplevel):
         self.status_other_widgets = [label, widget]
         self._update_status_other_visibility()
 
+    def _item_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        padx = (12, 0)
+        label = field_label(parent, "Other Service Name")
+        label.grid(row=row, column=column, sticky="w", padx=padx)
+        widget = text_entry(parent, self.item_other_var)
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+        self.item_other_widgets = [label, widget]
+        self._update_item_other_visibility()
+
+    def _update_item_other_visibility(self) -> None:
+        show_other = self.vars.get("item") is not None and self.vars["item"].get() == "Other"
+        for widget in self.item_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
     def _update_status_other_visibility(self) -> None:
         show_other = self.vars.get("status") is not None and self.vars["status"].get() == "Other"
         for widget in self.status_other_widgets:
@@ -1673,14 +1789,22 @@ class EditEntryWindow(tk.Toplevel):
             return status or None
         return selected_status or "Done"
 
+    def _resolved_item(self, selected_item: str, other_item: str) -> str | None:
+        if selected_item == "Other":
+            item = other_item.strip()
+            return item or None
+        return selected_item.strip() or None
+
     def save(self) -> None:
         updates = {key: variable.get().strip() for key, variable in self.vars.items()}
         if not updates["customer"]:
             messagebox.showerror("Missing customer", "Customer Name is required.")
             return
-        if not updates["item"]:
+        resolved_item = self._resolved_item(updates["item"], self.item_other_var.get())
+        if resolved_item is None:
             messagebox.showerror("Missing item", "Items Sold is required.")
             return
+        updates["item"] = resolved_item
         if not updates["buying_amount"]:
             updates["buying_amount"] = "0"
         if not updates["selling_amount"]:
@@ -1695,12 +1819,16 @@ class EditEntryWindow(tk.Toplevel):
             messagebox.showerror("Missing status reason", "Please write the reason for Other status.")
             return
         updates["status"] = resolved_status
+        original_entry = dict(self.entry)
         updated = self.dashboard.app.attendance_store.update_sales_entry(
             int(self.entry["id"]),
             self.dashboard._employee_username(),
             updates,
         )
         updated_entry = self.dashboard._sales_entry_from_store_row(updated)
+        updated_entry["previous_customer"] = original_entry.get("customer", "")
+        updated_entry["previous_item"] = original_entry.get("item", "")
+        updated_entry["previous_order_id"] = original_entry.get("order_id", "")
         self.entry.update(updated_entry)
         self.dashboard._update_sales_entry_cache(updated)
         self.dashboard.last_saved_label.configure(

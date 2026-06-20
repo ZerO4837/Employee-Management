@@ -77,9 +77,39 @@ SIDEBAR_DISABLED_TEXT = "#66789a"
 FONT = "Segoe UI"
 FONT_BOLD = "Segoe UI Semibold"
 
+SALES_SERVICE_NAMES = [
+    "5G IPTV Monthly",
+    "Adobe Creative Cloud Monthly Own Email",
+    "Adobe Creative Cloud Monthly Private",
+    "Adobe Creative Cloud Monthly Shared",
+    "B1G IPTV Monthly",
+    "Capcut Private Monthly",
+    "Chatgpt Private Monthly",
+    "Chatgpt Shared Monthly",
+    "Claude Pro Monthly",
+    "HBO Max Screen",
+    "Netflix Screens",
+    "Nord VPN Private Monthly",
+    "Nord VPN Shared Monthly",
+    "Opplex IPTV Monthly",
+    "Prime Video Monthly Full Account",
+    "Prime Video Screen",
+    "Prime Video Screen 6 month",
+    "Proton VPN Private Monthly",
+    "Proton VPN Shared Monthly",
+    "Spotify Solo 6 Month",
+    "Starshare IPTV Monthly",
+    "Trex IPTV Monthly",
+    "Windscribe VPN Shared Monthly",
+    "Youtube Premium 6 Month",
+    "Youtube Premium Monthly",
+    "Youtube Premium Yearly",
+    "Other",
+]
+
 SALES_FIELDS = [
     ("customer", "Customer Name", "entry", None),
-    ("item", "Items Sold", "entry", None),
+    ("item", "Items Sold", "combo", SALES_SERVICE_NAMES),
     ("order_id", "Email/Order ID", "entry", None),
     ("buying_amount", "Buying Amount", "entry", None),
     ("selling_amount", "Selling Amount", "entry", None),

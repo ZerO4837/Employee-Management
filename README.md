@@ -70,6 +70,17 @@ H Date (auto-filled as day/month/year)
 
 If Status is set to `Other`, the app opens an extra reason field and writes that reason into column G.
 
+The Items Sold field uses a preset service dropdown. Selecting `Other` opens an extra service-name field.
+
+Two shared-screen services have special account-fill behavior:
+
+- `Netflix Screens` uses a maximum of 5 customer names per same Email/Order ID.
+- `HBO Max Screen` uses a maximum of 9 customer names per same Email/Order ID.
+
+When one of those services is sold again with the same Email/Order ID, the Excel sync updates the existing workbook row instead of creating a new row. The new customer name is appended to column A with a comma, and the new Selling Amount is added into that row. Buying Amount stays unchanged on the account row. If the account is already full, the employee sees a warning to use a new account email.
+
+If a Netflix/HBO customer name is edited from the 5-Day Data screen, Excel replaces the previous name in that comma-separated customer list instead of adding another customer.
+
 New entries are saved locally first, then copied into the workbook in the background so the employee form does not freeze while Excel opens and saves the OneDrive file. By default, source runs write to:
 
 ```text

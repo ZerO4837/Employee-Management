@@ -262,6 +262,9 @@ class AttendanceStore:
             "excel_row": "INTEGER",
             "excel_synced_at": "TEXT NOT NULL DEFAULT ''",
             "excel_sync_error": "TEXT NOT NULL DEFAULT ''",
+            "previous_customer": "TEXT NOT NULL DEFAULT ''",
+            "previous_item": "TEXT NOT NULL DEFAULT ''",
+            "previous_order_id": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in required_columns.items():
             if name not in columns:
@@ -802,6 +805,16 @@ class AttendanceStore:
         selling_amount = updates.get("selling_amount", "")
         profit = _profit_value(buying_amount, selling_amount)
         with self.connect() as connection:
+            previous = connection.execute(
+                """
+                SELECT customer, item, order_id
+                FROM sales_entries
+                WHERE id = ? AND employee_username = ?
+                """,
+                (entry_id, employee_username),
+            ).fetchone()
+            if previous is None:
+                raise ValueError("Sales entry could not be found.")
             connection.execute(
                 """
                 UPDATE sales_entries
@@ -814,6 +827,9 @@ class AttendanceStore:
                     selling_amount = ?,
                     profit = ?,
                     notes = ?,
+                    previous_customer = ?,
+                    previous_item = ?,
+                    previous_order_id = ?,
                     updated_at = ?
                 WHERE id = ? AND employee_username = ?
                 """,
@@ -827,6 +843,9 @@ class AttendanceStore:
                     selling_amount,
                     profit,
                     updates.get("notes", ""),
+                    previous["customer"],
+                    previous["item"],
+                    previous["order_id"],
                     updated_at,
                     entry_id,
                     employee_username,
@@ -850,6 +869,9 @@ class AttendanceStore:
                 SET excel_row = ?,
                     excel_synced_at = ?,
                     excel_sync_error = '',
+                    previous_customer = '',
+                    previous_item = '',
+                    previous_order_id = '',
                     updated_at = ?
                 WHERE id = ? AND employee_username = ?
                 """,
