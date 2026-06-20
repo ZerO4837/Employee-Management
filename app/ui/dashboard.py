@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import queue
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -44,6 +46,7 @@ from app.ui.widgets import (
     status_pill,
     text_entry,
 )
+from app.excel_sales import ExcelSyncResult
 from app.utils import duration_label, money_label, now_label, today_label
 
 
@@ -82,6 +85,11 @@ class DashboardPage(tk.Frame):
         self.sales_entries: list[dict[str, str]] = []
         self.sales_selected_date = self._sales_date()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
+        self.sync_retry_button: tk.Button | None = None
+        self.excel_sync_queue: list[tuple[dict[str, str], str, int | None]] = []
+        self.excel_sync_results: queue.Queue[tuple[dict[str, str], str, int | None, ExcelSyncResult]] = queue.Queue()
+        self.excel_sync_busy = False
+        self.excel_sync_pending_entry_ids: set[str] = set()
         self.next_sales_id = 1
         self.attendance_events: list[dict[str, str]] = []
         self.checked_in = False
@@ -112,6 +120,7 @@ class DashboardPage(tk.Frame):
         self.shell: tk.Frame | None = None
         self._build()
         self._tick_clock()
+        self._poll_excel_sync_results()
 
     def _build(self) -> None:
         self.grid_columnconfigure(1, weight=1)
@@ -570,6 +579,7 @@ class DashboardPage(tk.Frame):
         self.today_tree.tag_configure("entry_even", background=WHITE, foreground=TEXT)
         self.today_tree.tag_configure("entry_odd", background="#f8fbff", foreground=TEXT)
         self.today_tree.grid(row=1, column=0, sticky="nsew")
+        self.today_tree.bind("<<TreeviewSelect>>", lambda _event: self._refresh_sync_retry_action())
 
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.today_tree.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
@@ -582,6 +592,7 @@ class DashboardPage(tk.Frame):
         edit_selected_button = make_button(actions, "Edit Selected", self.edit_selected_entry, "primary")
         edit_selected_button.pack(side="left", padx=(0, 10))
         self.shift_required_buttons.append(edit_selected_button)
+        self.sync_retry_button = make_button(actions, "Sync Again With Excel", self.retry_selected_excel_sync, "warning")
         return view
 
     def _build_sales_day_card(self, parent: tk.Misc, index: int) -> None:
@@ -751,6 +762,23 @@ class DashboardPage(tk.Frame):
                 return index
         return 1
 
+    def _sales_entry_from_store_row(self, entry: dict[str, str]) -> dict[str, str]:
+        item = dict(entry)
+        item["id"] = str(item["id"])
+        if "entry_date" in item:
+            item["date"] = item.pop("entry_date")
+        if "entry_time" in item:
+            item["time"] = item.pop("entry_time")
+        return item
+
+    def _update_sales_entry_cache(self, updated: dict[str, str]) -> dict[str, str]:
+        item = self._sales_entry_from_store_row(updated)
+        for index, entry in enumerate(self.sales_entries):
+            if str(entry.get("id", "")) == item["id"]:
+                self.sales_entries[index] = item
+                break
+        return item
+
     def _refresh_sales_entries_from_store(self) -> None:
         visible_dates = self._sales_visible_dates()
         self.app.attendance_store.purge_old_synced_sales_entries(self._employee_username(), visible_dates[0])
@@ -761,11 +789,7 @@ class DashboardPage(tk.Frame):
             entries.extend(self.app.attendance_store.list_sales_entries(self._employee_username(), entry_date))
         normalized = []
         for entry in entries:
-            item = dict(entry)
-            item["id"] = str(item["id"])
-            item["date"] = item.pop("entry_date")
-            item["time"] = item.pop("entry_time")
-            normalized.append(item)
+            normalized.append(self._sales_entry_from_store_row(entry))
         self.sales_entries = normalized
 
     def _select_sales_day_slot(self, index: int) -> None:
@@ -1017,6 +1041,128 @@ class DashboardPage(tk.Frame):
                     entry["status"],
                 ),
             )
+        self._refresh_sync_retry_action()
+
+    def _selected_entry_for_sync_action(self) -> dict[str, str] | None:
+        selection = self.today_tree.selection()
+        if not selection:
+            return None
+        entry_id = selection[0]
+        for entry in self.sales_entries:
+            if entry["id"] == entry_id:
+                return entry
+        return None
+
+    def _entry_needs_excel_retry(self, entry: dict[str, str] | None) -> bool:
+        if entry is None:
+            return False
+        if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:
+            return False
+        return not entry.get("excel_synced_at") and bool(entry.get("excel_sync_error"))
+
+    def _refresh_sync_retry_action(self) -> None:
+        if self.sync_retry_button is None:
+            return
+        entry = self._selected_entry_for_sync_action()
+        if self._entry_needs_excel_retry(entry):
+            if not self.sync_retry_button.winfo_ismapped():
+                self.sync_retry_button.pack(side="left", padx=(0, 10))
+        else:
+            self.sync_retry_button.pack_forget()
+
+    def _queue_excel_sync(self, entry: dict[str, str], source: str, display_number: int | None = None) -> bool:
+        entry_id = str(entry.get("id", ""))
+        if not entry_id or entry_id in self.excel_sync_pending_entry_ids:
+            return False
+        pending_entry = self._mark_excel_sync_pending(entry)
+        self.excel_sync_pending_entry_ids.add(entry_id)
+        self.excel_sync_queue.append((pending_entry, source, display_number))
+        self._refresh_sync_retry_action()
+        self._start_next_excel_sync()
+        return True
+
+    def _mark_excel_sync_pending(self, entry: dict[str, str]) -> dict[str, str]:
+        updated = self.app.attendance_store.mark_sales_excel_error(
+            int(entry["id"]),
+            self._employee_username(),
+            "Excel sync pending in background.",
+        )
+        return self._update_sales_entry_cache(updated)
+
+    def _start_next_excel_sync(self) -> None:
+        if self.excel_sync_busy or not self.excel_sync_queue:
+            return
+        entry, source, display_number = self.excel_sync_queue.pop(0)
+        self.excel_sync_busy = True
+        worker = threading.Thread(
+            target=self._run_excel_sync_worker,
+            args=(entry, source, display_number),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_excel_sync_worker(self, entry: dict[str, str], source: str, display_number: int | None) -> None:
+        try:
+            sync_result = self.app.sales_workbook.sync_entry(entry)
+        except Exception as exc:
+            sync_result = ExcelSyncResult(False, message=str(exc))
+        self.excel_sync_results.put((entry, source, display_number, sync_result))
+
+    def _poll_excel_sync_results(self) -> None:
+        while True:
+            try:
+                entry, source, display_number, sync_result = self.excel_sync_results.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._finish_excel_sync(entry, source, display_number, sync_result)
+            except Exception as exc:
+                messagebox.showwarning("Excel sync", f"Excel sync status could not be updated:\n{exc}")
+        self.after(250, self._poll_excel_sync_results)
+
+    def _finish_excel_sync(
+        self,
+        entry: dict[str, str],
+        source: str,
+        display_number: int | None,
+        sync_result: ExcelSyncResult,
+    ) -> None:
+        entry_id = str(entry.get("id", ""))
+        self.excel_sync_busy = False
+        self.excel_sync_pending_entry_ids.discard(entry_id)
+
+        try:
+            if sync_result.saved and sync_result.row is not None:
+                updated = self.app.attendance_store.mark_sales_excel_sync(
+                    int(entry["id"]),
+                    self._employee_username(),
+                    sync_result.row,
+                )
+                self._update_sales_entry_cache(updated)
+                if source == "edit":
+                    self.last_saved_label.configure(text="Data updated and synced with Excel.")
+                elif source == "retry":
+                    self.last_saved_label.configure(text="Data synced with Excel.")
+                else:
+                    self.last_saved_label.configure(text="Data added and synced with Excel.")
+                if source == "retry":
+                    messagebox.showinfo("Excel synced", "Data synced with Excel.")
+            else:
+                message = sync_result.message or "Excel sync failed."
+                updated = self.app.attendance_store.mark_sales_excel_error(
+                    int(entry["id"]),
+                    self._employee_username(),
+                    message,
+                )
+                self._update_sales_entry_cache(updated)
+                self.last_saved_label.configure(
+                    text="Data saved locally. Excel sync failed; use Sync Again With Excel."
+                )
+                if source in {"retry", "edit"}:
+                    messagebox.showwarning("Excel sync failed", f"Excel sync still failed:\n{message}")
+        finally:
+            self.refresh_all()
+            self._start_next_excel_sync()
 
     def _refresh_recent_activity(self) -> None:
         self.recent_list.delete(0, tk.END)
@@ -1226,28 +1372,11 @@ class DashboardPage(tk.Frame):
         entry["date"] = self._sales_date()
         entry["time"] = now_label()
         saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
-        sync_result = self.app.sales_workbook.sync_entry(saved)
-        if sync_result.saved and sync_result.row is not None:
-            saved = self.app.attendance_store.mark_sales_excel_sync(
-                int(saved["id"]),
-                self._employee_username(),
-                sync_result.row,
-            )
-            messagebox.showinfo("Entry saved", "Sold item entry saved.")
-        else:
-            saved = self.app.attendance_store.mark_sales_excel_error(
-                int(saved["id"]),
-                self._employee_username(),
-                sync_result.message,
-            )
-            messagebox.showwarning(
-                "Entry saved locally",
-                f"Entry was saved in the app, but Excel sync failed:\n{sync_result.message}",
-            )
         daily_number = len(self.app.attendance_store.list_sales_entries(self._employee_username(), entry["date"]))
-        self.last_saved_label.configure(text=f"#{daily_number} {entry['item']} saved at {entry['time']}")
+        self.last_saved_label.configure(text="Data added. Excel syncing...")
         self.clear_sales_form()
         self.refresh_all()
+        self._queue_excel_sync(self._sales_entry_from_store_row(saved), "new", daily_number)
 
     def selected_entry(self) -> dict[str, str] | None:
         selection = self.today_tree.selection()
@@ -1268,6 +1397,20 @@ class DashboardPage(tk.Frame):
         if entry is None:
             return
         EditEntryWindow(self, entry)
+
+    def retry_selected_excel_sync(self) -> None:
+        entry = self.selected_entry()
+        if entry is None:
+            return
+        if not self._entry_needs_excel_retry(entry):
+            messagebox.showinfo("Excel sync", "This entry is already synced or currently syncing.")
+            self._refresh_sync_retry_action()
+            return
+
+        display_number = self._sales_entry_display_number(entry)
+        if self._queue_excel_sync(entry, "retry", display_number):
+            self.last_saved_label.configure(text="Excel sync retry started...")
+            self.refresh_all()
 
 
 class EditEntryWindow(tk.Toplevel):
@@ -1408,26 +1551,14 @@ class EditEntryWindow(tk.Toplevel):
             self.dashboard._employee_username(),
             updates,
         )
-        sync_result = self.dashboard.app.sales_workbook.sync_entry(updated)
-        if sync_result.saved and sync_result.row is not None:
-            updated = self.dashboard.app.attendance_store.mark_sales_excel_sync(
-                int(self.entry["id"]),
-                self.dashboard._employee_username(),
-                sync_result.row,
-            )
-        else:
-            updated = self.dashboard.app.attendance_store.mark_sales_excel_error(
-                int(self.entry["id"]),
-                self.dashboard._employee_username(),
-                sync_result.message,
-            )
-            messagebox.showwarning(
-                "Entry updated locally",
-                f"Entry was updated in the app, but Excel sync failed:\n{sync_result.message}",
-            )
-        self.entry.update(updated)
-        self.dashboard.last_saved_label.configure(text=f"#{self.display_number} updated at {now_label()}")
+        updated_entry = self.dashboard._sales_entry_from_store_row(updated)
+        self.entry.update(updated_entry)
+        self.dashboard._update_sales_entry_cache(updated)
+        self.dashboard.last_saved_label.configure(
+            text="Data updated. Excel syncing..."
+        )
         self.dashboard.refresh_all()
+        self.dashboard._queue_excel_sync(updated_entry, "edit", self.display_number)
         self.destroy()
 
 

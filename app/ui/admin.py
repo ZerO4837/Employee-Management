@@ -412,21 +412,28 @@ class AdminPage(tk.Frame):
             show_app_alert(self, "Missing workbook", "Please select or upload an Excel workbook.", "warning")
             return
         if workbook_path.lower().startswith(("http://", "https://")):
-            show_app_alert(
-                self,
-                "Use a workbook file",
-                "OneDrive web links need a cloud API sync layer. Select or upload an .xlsx/.xlsm file here.",
-                "warning",
-            )
-            return
-        path = Path(os.path.expandvars(workbook_path)).expanduser()
-        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
-            show_app_alert(self, "Invalid workbook", "The workbook target must be an .xlsx or .xlsm file.", "warning")
-            return
-        if not path.exists() and not path.parent.exists():
-            show_app_alert(self, "Folder not found", "The workbook folder does not exist.", "warning")
-            return
-        self.app.save_sales_workbook_settings(str(path), worksheet_name)
+            if not workbook_path.lower().startswith("https://d.docs.live.net/"):
+                show_app_alert(
+                    self,
+                    "Use a direct OneDrive file URL",
+                    "Use the d.docs.live.net workbook URL or select a local .xlsx/.xlsm file.",
+                    "warning",
+                )
+                return
+            if not workbook_path.lower().endswith((".xlsx", ".xlsm")):
+                show_app_alert(self, "Invalid workbook", "The cloud workbook URL must end with .xlsx or .xlsm.", "warning")
+                return
+            saved_path = workbook_path
+        else:
+            path = Path(os.path.expandvars(workbook_path)).expanduser()
+            if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+                show_app_alert(self, "Invalid workbook", "The workbook target must be an .xlsx or .xlsm file.", "warning")
+                return
+            if not path.exists() and not path.parent.exists():
+                show_app_alert(self, "Folder not found", "The workbook folder does not exist.", "warning")
+                return
+            saved_path = str(path)
+        self.app.save_sales_workbook_settings(saved_path, worksheet_name)
         self._refresh_excel_settings()
         show_app_alert(self, success_title, "Future sales entries will use this workbook target.", "success")
 
@@ -434,8 +441,11 @@ class AdminPage(tk.Frame):
         workbook = self.app.sales_workbook
         self.excel_path_var.set(workbook.display_path)
         self.excel_sheet_var.set(workbook.worksheet_name)
-        path = Path(workbook.display_path)
-        file_state = "file found" if path.exists() else "file will be created"
+        if workbook.display_path.lower().startswith(("http://", "https://")):
+            file_state = "cloud workbook URL"
+        else:
+            path = Path(workbook.display_path)
+            file_state = "file found" if path.exists() else "file will be created"
         sheet_state = workbook.worksheet_name or "active sheet"
         self.excel_status_label.configure(
             text=f"Workbook: {workbook.display_path}\nWorksheet: {sheet_state}\nStatus: {file_state}"

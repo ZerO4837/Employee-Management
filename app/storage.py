@@ -871,6 +871,7 @@ class AttendanceStore:
                 """
                 UPDATE sales_entries
                 SET excel_sync_error = ?,
+                    excel_synced_at = '',
                     updated_at = ?
                 WHERE id = ? AND employee_username = ?
                 """,

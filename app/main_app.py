@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
@@ -133,12 +132,12 @@ class EmployeeApp(tk.Tk):
     def load_sales_workbook_settings(self) -> None:
         workbook_path = self.attendance_store.get_setting("sales_workbook_path", str(SALES_WORKBOOK_PATH))
         worksheet_name = self.attendance_store.get_setting("sales_worksheet_name", SALES_WORKSHEET_NAME)
-        self.sales_workbook = SalesWorkbook(Path(workbook_path), worksheet_name)
+        self.sales_workbook = SalesWorkbook(workbook_path, worksheet_name)
 
     def save_sales_workbook_settings(self, workbook_path: str, worksheet_name: str) -> None:
         self.attendance_store.set_setting("sales_workbook_path", workbook_path)
         self.attendance_store.set_setting("sales_worksheet_name", worksheet_name)
-        self.sales_workbook = SalesWorkbook(Path(workbook_path), worksheet_name)
+        self.sales_workbook = SalesWorkbook(workbook_path, worksheet_name)
 
     @property
     def display_user(self) -> str:

@@ -70,11 +70,13 @@ H Date (auto-filled as day/month/year)
 
 If Status is set to `Other`, the app opens an extra reason field and writes that reason into column G.
 
-New entries are saved locally first, then copied into the workbook. By default, source runs write to:
+New entries are saved locally first, then copied into the workbook in the background so the employee form does not freeze while Excel opens and saves the OneDrive file. By default, source runs write to:
 
 ```text
 data/sales_entries.xlsx
 ```
+
+Each new entry opens the current workbook and finds the next append row at that moment. The scan treats rows with real sales-entry data in Customer, Items Sold, Email/Order ID, Buying Amount, Selling Amount, or Status as occupied. Formula/date-only rows, such as pre-filled Profit formulas or prepared dates, are treated as empty so they do not push new sales far below the real data.
 
 Employee-facing entry numbers are display numbers only. They reset every date, so if yesterday has `#1` and `#2`, today's first sale shows as `#1`. The hidden database ID is still kept internally so editing and Excel sync can safely update the correct record.
 
@@ -99,9 +101,29 @@ Optional: set `DSP_SALES_WORKSHEET_NAME` if the data should go to a specific wor
 The admin panel can also change the active workbook without editing code:
 
 1. Log in with the admin account.
-2. Use `Browse` to select an existing `.xlsx` or `.xlsm` workbook path, or use `Upload Workbook` to copy a workbook into the app data folder.
+2. Use `Browse` to select an existing `.xlsx` or `.xlsm` workbook path. For OneDrive sync, browse to the synced OneDrive file itself.
 3. Optionally enter a worksheet name.
 4. Click `Save Target`.
+
+`Upload Workbook` copies a workbook into the app data folder for local-only use. For the owner OneDrive workflow, prefer `Browse` so the app writes directly to the synced cloud file.
+
+Close the workbook in Excel before employee entries are saved. If Excel has the file open, Windows may lock it and the app will keep the entry locally until the workbook can be written.
+
+If an entry is saved locally but Excel sync fails, the employee can open 5-Day Data, select that failed row, and use `Sync Again With Excel` after the workbook is available.
+
+If the app closes while Excel sync is still running, that entry stays marked for retry locally. Reopen the app, select the row in 5-Day Data, and use `Sync Again With Excel`.
+
+On Windows OneDrive workbook paths, the app uses Microsoft Excel in the background for saving. This avoids OneDrive file-handle errors that can happen when writing synced workbooks directly with `openpyxl`.
+
+If Excel shows two recent files with the same name, prefer the direct Socio Digital cloud workbook URL (`https://d.docs.live.net/...`) as the app target instead of the downloaded/local copy path. That keeps new entries going to `Socio Digital's OneDrive > Documents > Data 2026`.
+
+To get the direct workbook URL for a new month:
+
+1. Open the new month workbook from `Socio Digital's OneDrive` in the Excel desktop app.
+2. In Excel, go to `File` -> `Info`.
+3. Click `Copy Path`.
+4. Paste that value into the admin panel Sales Workbook target.
+5. If the copied value has anything after `.xlsx` or `.xlsm`, remove the extra part so it ends exactly with the workbook extension.
 
 Do not paste a OneDrive browser sharing URL into the workbook field. `https://1drv.ms/...` links open a web page; they are not writable workbook file paths for `openpyxl`.
 
