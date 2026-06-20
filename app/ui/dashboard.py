@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 import queue
 import threading
@@ -86,10 +87,14 @@ class DashboardPage(tk.Frame):
         self.sales_selected_date = self._sales_date()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
         self.sync_retry_button: tk.Button | None = None
+        self.excel_sync_status_label: tk.Label | None = None
+        self.sales_recent_frame: tk.Frame | None = None
         self.excel_sync_queue: list[tuple[dict[str, str], str, int | None]] = []
         self.excel_sync_results: queue.Queue[tuple[dict[str, str], str, int | None, ExcelSyncResult]] = queue.Queue()
         self.excel_sync_busy = False
         self.excel_sync_pending_entry_ids: set[str] = set()
+        self.close_after_excel_sync_requested = False
+        self.close_after_excel_sync_callback: Callable[[], None] | None = None
         self.next_sales_id = 1
         self.attendance_events: list[dict[str, str]] = []
         self.checked_in = False
@@ -476,7 +481,16 @@ class DashboardPage(tk.Frame):
         side.grid_columnconfigure(0, weight=1)
         tk.Label(side, text="Today", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(row=0, column=0, sticky="w")
         self.sales_today_count = tk.Label(side, text="0 entries", bg=WHITE, fg=BLUE, font=(FONT_BOLD, 28))
-        self.sales_today_count.grid(row=1, column=0, sticky="w", pady=(8, 28))
+        self.sales_today_count.grid(row=1, column=0, sticky="w", pady=(8, 12))
+
+        sync_row = tk.Frame(side, bg=WHITE)
+        sync_row.grid(row=2, column=0, sticky="ew", pady=(0, 18))
+        sync_row.grid_columnconfigure(1, weight=1)
+        tk.Label(sync_row, text="Excel Sync", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
+        )
+        self.excel_sync_status_label = status_pill(sync_row, "Up to date", fg=SUCCESS, bg="#eafaf4")
+        self.excel_sync_status_label.grid(row=0, column=1, sticky="w")
 
         GradientBand(side, start=BLUE, end=TEAL, height=4).grid(row=3, column=0, sticky="ew", pady=(0, 18))
         tk.Label(side, text="Last Saved", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(row=4, column=0, sticky="w", pady=(0, 8))
@@ -490,10 +504,17 @@ class DashboardPage(tk.Frame):
             justify="left",
         )
         self.last_saved_label.grid(row=5, column=0, sticky="w")
-        tk.Frame(side, bg=WHITE).grid(row=6, column=0, sticky="nsew")
-        side.grid_rowconfigure(6, weight=1)
+
+        tk.Label(side, text="Latest Entries", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(
+            row=6, column=0, sticky="w", pady=(22, 8)
+        )
+        self.sales_recent_frame = tk.Frame(side, bg=WHITE)
+        self.sales_recent_frame.grid(row=7, column=0, sticky="nsew")
+        self.sales_recent_frame.grid_columnconfigure(0, weight=1)
+        side.grid_rowconfigure(7, weight=1)
+
         open_today_button = make_button(side, "Open 5-Day Data", lambda: self.show_view("today"), "light")
-        open_today_button.grid(row=7, column=0, sticky="ew", pady=(18, 0))
+        open_today_button.grid(row=8, column=0, sticky="ew", pady=(18, 0))
         self.shift_required_buttons.append(open_today_button)
         return view
 
@@ -914,6 +935,25 @@ class DashboardPage(tk.Frame):
             set_button_enabled(button, shift_active)
 
         self._set_sales_inputs_enabled(shift_active)
+        if self.close_after_excel_sync_requested:
+            for button_group in (
+                self.start_day_buttons,
+                self.check_in_buttons,
+                self.start_break_buttons,
+                self.end_break_buttons,
+                self.checkout_buttons,
+                self.close_first_shift_buttons,
+                self.end_day_buttons,
+                self.shift_required_buttons,
+            ):
+                for button in button_group:
+                    set_button_enabled(button, False)
+            self._set_sales_inputs_enabled(False)
+            self.access_notice.configure(
+                text="Excel sync is finishing. The app will close automatically.",
+                fg=BLUE,
+            )
+            return
         if shift_active:
             self.access_notice.configure(text="Sales, breaks, and 5-day data controls are unlocked.", fg=SUCCESS)
         elif self.day_active:
@@ -998,12 +1038,93 @@ class DashboardPage(tk.Frame):
         self.attendance_date_label.configure(text=today_label())
 
         self.sales_today_count.configure(text=self._entry_count_text(len(today_entries)))
+        self._refresh_sales_sidebar(today_entries)
         self.today_summary_label.configure(
             text=f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} visible for 5 days"
         )
         self._refresh_sales_day_cards()
         self._refresh_selected_sales_day_header()
         self._apply_access_state()
+
+    def _sales_entry_sync_state(self, entry: dict[str, str]) -> tuple[str, str]:
+        if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:
+            return "Syncing", BLUE
+        if not entry.get("excel_synced_at") and entry.get("excel_sync_error"):
+            return "Retry needed", WARNING
+        if entry.get("excel_synced_at"):
+            return "Synced", SUCCESS
+        return "Saved", MUTED
+
+    def _refresh_sales_sidebar(self, today_entries: list[dict[str, str]]) -> None:
+        if self.excel_sync_status_label is not None:
+            pending_count = len(self.excel_sync_pending_entry_ids)
+            retry_count = sum(
+                1
+                for entry in self.sales_entries
+                if not entry.get("excel_synced_at")
+                and entry.get("excel_sync_error")
+                and str(entry.get("id", "")) not in self.excel_sync_pending_entry_ids
+            )
+            if pending_count:
+                if self.close_after_excel_sync_requested:
+                    text = "Closing after sync"
+                else:
+                    text = "Syncing" if pending_count == 1 else f"{pending_count} syncing"
+                self.excel_sync_status_label.configure(text=text, fg=BLUE, bg="#eef6ff")
+            elif retry_count:
+                self.excel_sync_status_label.configure(text="Retry needed", fg=WARNING, bg="#fff5e6")
+            else:
+                self.excel_sync_status_label.configure(text="Up to date", fg=SUCCESS, bg="#eafaf4")
+
+        if self.sales_recent_frame is None:
+            return
+        for child in self.sales_recent_frame.winfo_children():
+            child.destroy()
+
+        latest_entries = today_entries[-5:][::-1]
+        if not latest_entries:
+            tk.Label(
+                self.sales_recent_frame,
+                text="No entries yet today.",
+                bg=WHITE,
+                fg=MUTED,
+                font=(FONT, 10),
+                wraplength=240,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+            return
+
+        for index, entry in enumerate(latest_entries):
+            item = entry.get("item") or "Item"
+            customer = entry.get("customer") or "No customer"
+            sync_text, sync_color = self._sales_entry_sync_state(entry)
+            title = tk.Label(
+                self.sales_recent_frame,
+                text=f"{item} - {customer}",
+                bg=WHITE,
+                fg=TEXT,
+                font=(FONT_BOLD, 10),
+                wraplength=240,
+                justify="left",
+            )
+            title.grid(row=index * 3, column=0, sticky="w", pady=(0 if index == 0 else 8, 2))
+            meta = tk.Label(
+                self.sales_recent_frame,
+                text=f"{entry.get('time', '')} | {sync_text}",
+                bg=WHITE,
+                fg=sync_color,
+                font=(FONT, 9),
+                wraplength=240,
+                justify="left",
+            )
+            meta.grid(row=index * 3 + 1, column=0, sticky="w")
+            if index < len(latest_entries) - 1:
+                tk.Frame(self.sales_recent_frame, bg=LINE, height=1).grid(
+                    row=index * 3 + 2,
+                    column=0,
+                    sticky="ew",
+                    pady=(8, 0),
+                )
 
     def _refresh_attendance_log(self) -> None:
         self.attendance_events = self.app.attendance_store.list_employee_events(self._employee_username())
@@ -1070,6 +1191,32 @@ class DashboardPage(tk.Frame):
         else:
             self.sync_retry_button.pack_forget()
 
+    def has_active_excel_sync(self) -> bool:
+        return (
+            self.excel_sync_busy
+            or bool(self.excel_sync_queue)
+            or bool(self.excel_sync_pending_entry_ids)
+            or not self.excel_sync_results.empty()
+        )
+
+    def close_after_excel_sync(self, callback: Callable[[], None]) -> bool:
+        if not self.has_active_excel_sync():
+            return False
+        self.close_after_excel_sync_requested = True
+        self.close_after_excel_sync_callback = callback
+        self.last_saved_label.configure(text="Finishing Excel sync. App will close automatically...")
+        self._refresh_sales_sidebar(self._sales_entries_for_date(self._sales_date()))
+        return True
+
+    def _close_if_excel_sync_finished(self) -> None:
+        if not self.close_after_excel_sync_requested or self.has_active_excel_sync():
+            return
+        callback = self.close_after_excel_sync_callback
+        self.close_after_excel_sync_callback = None
+        self.close_after_excel_sync_requested = False
+        if callback is not None:
+            self.after(50, callback)
+
     def _queue_excel_sync(self, entry: dict[str, str], source: str, display_number: int | None = None) -> bool:
         entry_id = str(entry.get("id", ""))
         if not entry_id or entry_id in self.excel_sync_pending_entry_ids:
@@ -1077,6 +1224,7 @@ class DashboardPage(tk.Frame):
         pending_entry = self._mark_excel_sync_pending(entry)
         self.excel_sync_pending_entry_ids.add(entry_id)
         self.excel_sync_queue.append((pending_entry, source, display_number))
+        self._refresh_sales_sidebar(self._sales_entries_for_date(self._sales_date()))
         self._refresh_sync_retry_action()
         self._start_next_excel_sync()
         return True
@@ -1163,6 +1311,7 @@ class DashboardPage(tk.Frame):
         finally:
             self.refresh_all()
             self._start_next_excel_sync()
+            self._close_if_excel_sync_finished()
 
     def _refresh_recent_activity(self) -> None:
         self.recent_list.delete(0, tk.END)

@@ -46,6 +46,7 @@ class EmployeeApp(tk.Tk):
         self.logo_cache: dict[tuple[int, int], tk.PhotoImage] = {}
         self.current_user = ""
         self.current_role = ""
+        self.close_waiting_for_excel_sync = False
 
         self._configure_style()
         self._set_window_icon()
@@ -125,6 +126,17 @@ class EmployeeApp(tk.Tk):
         self.show_page("login")
 
     def close_app(self) -> None:
+        dashboard = self.pages.get("dashboard")
+        if (
+            isinstance(dashboard, DashboardPage)
+            and dashboard.close_after_excel_sync(self._finish_close_app)
+        ):
+            self.close_waiting_for_excel_sync = True
+            self.title(f"{APP_NAME} - Finishing Excel sync")
+            return
+        self._finish_close_app()
+
+    def _finish_close_app(self) -> None:
         self.current_user = ""
         self.current_role = ""
         self.destroy()

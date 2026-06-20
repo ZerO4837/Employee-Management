@@ -111,7 +111,7 @@ Close the workbook in Excel before employee entries are saved. If Excel has the 
 
 If an entry is saved locally but Excel sync fails, the employee can open 5-Day Data, select that failed row, and use `Sync Again With Excel` after the workbook is available.
 
-If the app closes while Excel sync is still running, that entry stays marked for retry locally. Reopen the app, select the row in 5-Day Data, and use `Sync Again With Excel`.
+If the employee tries to close the app while Excel sync is still running, the app waits for the active background sync queue to finish and then closes automatically. If Excel sync fails during that attempt, the entry still stays saved locally and can be retried from 5-Day Data.
 
 On Windows OneDrive workbook paths, the app uses Microsoft Excel in the background for saving. This avoids OneDrive file-handle errors that can happen when writing synced workbooks directly with `openpyxl`.
 
