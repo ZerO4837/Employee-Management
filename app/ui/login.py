@@ -16,12 +16,13 @@ from app.config import (
     MUTED,
     NAVY,
     NAVY_2,
+    SUCCESS,
     TEAL,
     TEXT,
     WHITE,
 )
-from app.ui.widgets import SurfaceCard, blend, draw_gradient, field_label, make_button, text_entry
-from app.utils import today_label
+from app.ui.widgets import SurfaceCard, blend, draw_gradient, make_button, set_button_enabled, status_pill
+from app.utils import now_label, today_label
 
 
 class BrandCanvas(tk.Canvas):
@@ -185,11 +186,20 @@ class LoginPage(tk.Frame):
         self.show_password_var = tk.BooleanVar(value=False)
         self.error_panel: tk.Frame | None = None
         self.error_message_label: tk.Label | None = None
+        self.login_clock_label: tk.Label | None = None
+        self.sign_in_button: tk.Button | None = None
+        self.password_toggle_button: tk.Button | None = None
+        self.field_frames: dict[str, tk.Frame] = {}
+        self.field_labels: dict[str, tk.Label] = {}
         self._build()
+        self.username_var.trace_add("write", lambda *_args: self._update_submit_state())
+        self.password_var.trace_add("write", lambda *_args: self._update_submit_state())
+        self._update_submit_state()
+        self._tick_login_clock()
 
     def _build(self) -> None:
-        self.grid_columnconfigure(0, weight=1, minsize=470)
-        self.grid_columnconfigure(1, weight=2)
+        self.grid_columnconfigure(0, weight=5, minsize=460)
+        self.grid_columnconfigure(1, weight=6)
         self.grid_rowconfigure(0, weight=1)
 
         BrandCanvas(self, self.app).grid(row=0, column=0, sticky="nsew")
@@ -199,15 +209,47 @@ class LoginPage(tk.Frame):
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
 
-        panel = SurfaceCard(right, padx=48, pady=42, accent=True, accent_start=BLUE, accent_end=TEAL)
-        panel.grid(row=0, column=0, sticky="", padx=62, pady=54)
+        panel = SurfaceCard(right, padx=0, pady=0, accent=True, accent_start=BLUE, accent_end=TEAL)
+        panel.grid(row=0, column=0, sticky="", padx=64, pady=54)
         body = panel.body
+        body.configure(padx=44, pady=38)
         body.grid_columnconfigure(0, weight=1)
 
-        tk.Label(body, text="Employee Login", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 26)).grid(row=0, column=0, sticky="w")
-        tk.Label(body, text=today_label(), bg=WHITE, fg=MUTED, font=(FONT, 11)).grid(
-            row=1, column=0, sticky="w", pady=(7, 28)
+        top_row = tk.Frame(body, bg=WHITE)
+        top_row.grid(row=0, column=0, sticky="ew")
+        top_row.grid_columnconfigure(0, weight=1)
+        tk.Label(top_row, text="Welcome Back", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 26)).grid(
+            row=0, column=0, sticky="w"
         )
+        status_pill(top_row, "Secure Access", fg=SUCCESS, bg="#eafaf4").grid(row=0, column=1, sticky="e", padx=(14, 0))
+
+        tk.Label(
+            body,
+            text="Sign in to continue your daily workspace.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 11),
+        ).grid(row=1, column=0, sticky="w", pady=(7, 18))
+
+        session_row = tk.Frame(body, bg="#f8fbff", padx=14, pady=11, highlightbackground=LINE, highlightthickness=1)
+        session_row.grid(row=2, column=0, sticky="ew", pady=(0, 22))
+        session_row.grid_columnconfigure(1, weight=1)
+        tk.Label(session_row, text="TODAY", bg="#f8fbff", fg=BLUE_DARK, font=(FONT_BOLD, 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        tk.Label(session_row, text=today_label(), bg="#f8fbff", fg=TEXT, font=(FONT_BOLD, 10)).grid(
+            row=0, column=1, sticky="w"
+        )
+        self.login_clock_label = tk.Label(session_row, text="", bg="#f8fbff", fg=MUTED, font=(FONT, 10))
+        self.login_clock_label.grid(row=0, column=2, sticky="e")
+
+        tk.Label(body, text="Account Details", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 13)).grid(
+            row=3, column=0, sticky="w", pady=(0, 12)
+        )
+
+        self.username_entry = self._entry(body, "Username", self.username_var, 4, "username")
+        self.password_entry = self._entry(body, "Password", self.password_var, 6, "password", show="*")
+        self.username_entry.focus_set()
 
         self.error_panel = tk.Frame(
             body,
@@ -217,15 +259,24 @@ class LoginPage(tk.Frame):
             highlightbackground="#f0c3ca",
             highlightthickness=1,
         )
-        self.error_panel.grid(row=2, column=0, sticky="ew", pady=(0, 18))
-        self.error_panel.grid_columnconfigure(0, weight=1)
+        self.error_panel.grid(row=8, column=0, sticky="ew", pady=(0, 16))
+        self.error_panel.grid_columnconfigure(1, weight=1)
         tk.Label(
             self.error_panel,
-            text="LOGIN ERROR",
+            text="!",
+            bg=DANGER,
+            fg=WHITE,
+            font=(FONT_BOLD, 10),
+            width=3,
+            pady=4,
+        ).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
+        tk.Label(
+            self.error_panel,
+            text="Login could not continue",
             bg="#fff3f4",
             fg=DANGER,
-            font=(FONT_BOLD, 8),
-        ).grid(row=0, column=0, sticky="w")
+            font=(FONT_BOLD, 10),
+        ).grid(row=0, column=1, sticky="w")
         self.error_message_label = tk.Label(
             self.error_panel,
             text="",
@@ -235,28 +286,20 @@ class LoginPage(tk.Frame):
             justify="left",
             wraplength=420,
         )
-        self.error_message_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.error_message_label.grid(row=1, column=1, sticky="w", pady=(4, 0))
         self.error_panel.grid_remove()
 
-        self.username_entry = self._entry(body, "Username", self.username_var, 3)
-        self.password_entry = self._entry(body, "Password", self.password_var, 5, show="*")
-        self.username_entry.focus_set()
+        action_row = tk.Frame(body, bg=WHITE)
+        action_row.grid(row=9, column=0, sticky="ew")
+        action_row.grid_columnconfigure(0, weight=1)
+        self.sign_in_button = make_button(action_row, "Unlock Workspace", self._submit_login, "primary")
+        self.sign_in_button.grid(row=0, column=0, sticky="ew", pady=(2, 12))
 
-        tk.Checkbutton(
-            body,
-            text="Show password",
-            variable=self.show_password_var,
-            command=self._toggle_password,
-            bg=WHITE,
-            fg=MUTED,
-            activebackground=WHITE,
-            font=(FONT, 10),
-        ).grid(row=7, column=0, sticky="w", pady=(0, 18))
-
-        make_button(body, "Sign In", self._submit_login, "primary").grid(row=8, column=0, sticky="ew", pady=(2, 12))
-
+        bottom_row = tk.Frame(body, bg=WHITE)
+        bottom_row.grid(row=10, column=0, sticky="ew")
+        bottom_row.grid_columnconfigure(0, weight=1)
         forgot = tk.Button(
-            body,
+            bottom_row,
             text="Forgot password?",
             command=lambda: self.app.show_page("reset"),
             bg=WHITE,
@@ -268,7 +311,10 @@ class LoginPage(tk.Frame):
             cursor="hand2",
             font=(FONT_BOLD, 10),
         )
-        forgot.grid(row=9, column=0, sticky="w")
+        forgot.grid(row=0, column=0, sticky="w")
+        tk.Label(bottom_row, text="Protected company login", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=0, column=1, sticky="e"
+        )
 
         self.password_entry.bind("<Return>", lambda _event: self._submit_login())
         self.username_entry.bind("<Return>", lambda _event: self.password_entry.focus_set())
@@ -279,16 +325,87 @@ class LoginPage(tk.Frame):
         label: str,
         variable: tk.StringVar,
         row: int,
+        key: str,
         show: str | None = None,
     ) -> tk.Entry:
-        field_label(parent, label).grid(row=row, column=0, sticky="w")
-        entry = text_entry(parent, variable, show=show)
-        entry.configure(font=(FONT, 12))
-        entry.grid(row=row + 1, column=0, sticky="ew", ipady=10, pady=(8, 18))
+        label_widget = tk.Label(parent, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10))
+        label_widget.grid(row=row, column=0, sticky="w")
+        self.field_labels[key] = label_widget
+
+        field = tk.Frame(
+            parent,
+            bg="#f8fbff",
+            padx=12,
+            pady=3,
+            highlightbackground=LINE,
+            highlightthickness=1,
+        )
+        field.grid(row=row + 1, column=0, sticky="ew", ipady=4, pady=(8, 18))
+        field.grid_columnconfigure(0, weight=1)
+        field.bind("<Button-1>", lambda _event: entry.focus_set())
+        self.field_frames[key] = field
+
+        entry = tk.Entry(
+            field,
+            textvariable=variable,
+            show=show or "",
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=(FONT, 12),
+            insertbackground=TEXT,
+        )
+        entry.grid(row=0, column=0, sticky="ew", ipady=8)
+        entry.bind("<FocusIn>", lambda _event, field_key=key: self._set_field_focus(field_key, True))
+        entry.bind("<FocusOut>", lambda _event, field_key=key: self._set_field_focus(field_key, False))
+
+        if key == "password":
+            self.password_toggle_button = tk.Button(
+                field,
+                text="Show",
+                command=self._toggle_password,
+                bg="#f8fbff",
+                fg=BLUE_DARK,
+                activebackground="#f8fbff",
+                activeforeground=BLUE,
+                relief="flat",
+                bd=0,
+                cursor="hand2",
+                font=(FONT_BOLD, 9),
+                padx=10,
+                pady=4,
+                highlightthickness=0,
+            )
+            self.password_toggle_button.grid(row=0, column=1, sticky="e", padx=(10, 0))
         return entry
 
+    def _set_field_focus(self, key: str, active: bool) -> None:
+        frame = self.field_frames.get(key)
+        label = self.field_labels.get(key)
+        if frame is not None:
+            frame.configure(highlightbackground=BLUE if active else LINE)
+        if label is not None:
+            label.configure(fg=BLUE_DARK if active else TEXT)
+
     def _toggle_password(self) -> None:
-        self.password_entry.configure(show="" if self.show_password_var.get() else "*")
+        self.show_password_var.set(not self.show_password_var.get())
+        showing = self.show_password_var.get()
+        self.password_entry.configure(show="" if showing else "*")
+        if self.password_toggle_button is not None:
+            self.password_toggle_button.configure(text="Hide" if showing else "Show")
+
+    def _update_submit_state(self) -> None:
+        if self.sign_in_button is None:
+            return
+        ready = bool(self.username_var.get().strip()) and bool(self.password_var.get())
+        set_button_enabled(self.sign_in_button, ready)
+
+    def _tick_login_clock(self) -> None:
+        if self.login_clock_label is not None:
+            self.login_clock_label.configure(text=now_label())
+        self.after(1000, self._tick_login_clock)
 
     def show_login_error(self, message: str) -> None:
         if self.error_panel is None or self.error_message_label is None:
@@ -304,4 +421,6 @@ class LoginPage(tk.Frame):
 
     def _submit_login(self) -> None:
         self.clear_login_error()
+        if self.sign_in_button is not None and str(self.sign_in_button["state"]) == "disabled":
+            return
         self.app.login(self.username_var.get(), self.password_var.get())
