@@ -116,6 +116,8 @@ class DashboardPage(tk.Frame):
         self.excel_sync_pending_entry_ids: set[str] = set()
         self.close_after_excel_sync_requested = False
         self.close_after_excel_sync_callback: Callable[[], None] | None = None
+        self._clock_after_id: str | None = None
+        self._excel_poll_after_id: str | None = None
         self.next_sales_id = 1
         self.attendance_events: list[dict[str, str]] = []
         self.checked_in = False
@@ -1048,7 +1050,7 @@ class DashboardPage(tk.Frame):
         return False
 
     def _employee_username(self) -> str:
-        return self.app.display_user
+        return self.app.data_user
 
     def _sales_date(self) -> str:
         return datetime.now().strftime("%Y-%m-%d")
@@ -1595,8 +1597,10 @@ class DashboardPage(tk.Frame):
         self._refresh_notification_badge()
 
     def _tick_clock(self) -> None:
+        if not self.winfo_exists():
+            return
         self.clock_label.configure(text=f"{today_label()}  |  {now_label()}")
-        self.after(1000, self._tick_clock)
+        self._clock_after_id = self.after(1000, self._tick_clock)
 
     def _refresh_stats(self) -> None:
         if self.on_break:
@@ -1887,6 +1891,8 @@ class DashboardPage(tk.Frame):
         self.excel_sync_results.put((entry, source, display_number, sync_result))
 
     def _poll_excel_sync_results(self) -> None:
+        if not self.winfo_exists():
+            return
         while True:
             try:
                 entry, source, display_number, sync_result = self.excel_sync_results.get_nowait()
@@ -1896,7 +1902,19 @@ class DashboardPage(tk.Frame):
                 self._finish_excel_sync(entry, source, display_number, sync_result)
             except Exception as exc:
                 messagebox.showwarning("Excel sync", f"Excel sync status could not be updated:\n{exc}")
-        self.after(250, self._poll_excel_sync_results)
+        self._excel_poll_after_id = self.after(250, self._poll_excel_sync_results)
+
+    def destroy(self) -> None:
+        for after_id in (self._clock_after_id, self._excel_poll_after_id):
+            if after_id is None:
+                continue
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._clock_after_id = None
+        self._excel_poll_after_id = None
+        super().destroy()
 
     def _finish_excel_sync(
         self,

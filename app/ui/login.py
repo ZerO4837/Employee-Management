@@ -191,6 +191,7 @@ class LoginPage(tk.Frame):
         self.password_toggle_button: tk.Button | None = None
         self.field_frames: dict[str, tk.Frame] = {}
         self.field_labels: dict[str, tk.Label] = {}
+        self._login_clock_after_id: str | None = None
         self._build()
         self.username_var.trace_add("write", lambda *_args: self._update_submit_state())
         self.password_var.trace_add("write", lambda *_args: self._update_submit_state())
@@ -403,9 +404,20 @@ class LoginPage(tk.Frame):
         set_button_enabled(self.sign_in_button, ready)
 
     def _tick_login_clock(self) -> None:
+        if not self.winfo_exists():
+            return
         if self.login_clock_label is not None:
             self.login_clock_label.configure(text=now_label())
-        self.after(1000, self._tick_login_clock)
+        self._login_clock_after_id = self.after(1000, self._tick_login_clock)
+
+    def destroy(self) -> None:
+        if self._login_clock_after_id is not None:
+            try:
+                self.after_cancel(self._login_clock_after_id)
+            except tk.TclError:
+                pass
+            self._login_clock_after_id = None
+        super().destroy()
 
     def show_login_error(self, message: str) -> None:
         if self.error_panel is None or self.error_message_label is None:

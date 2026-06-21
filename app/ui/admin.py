@@ -14,6 +14,7 @@ from app.config import (
     BG,
     BLUE,
     BLUE_DARK,
+    DANGER,
     FONT,
     FONT_BOLD,
     LINE,
@@ -39,6 +40,18 @@ class AdminPage(tk.Frame):
         self.selected_shift_id: int | None = None
         self.announcement_category_var = tk.StringVar(value="General")
         self.announcement_title_var = tk.StringVar()
+        self.employee_name_var = tk.StringVar()
+        self.employee_username_var = tk.StringVar()
+        self.employee_password_var = tk.StringVar()
+        self.employee_active_var = tk.BooleanVar(value=True)
+        self.selected_employee_username: str | None = None
+        self.employee_active_status_label: tk.Label | None = None
+        self.employee_password_status_label: tk.Label | None = None
+        self.employee_form_title_label: tk.Label | None = None
+        self.employee_form_hint_label: tk.Label | None = None
+        self.employee_count_label: tk.Label | None = None
+        self.employee_name_entry: tk.Entry | None = None
+        self.employee_save_button: tk.Button | None = None
         self.template_service_var = tk.StringVar(value="Capcut Private Monthly")
         self.template_other_service_var = tk.StringVar()
         self.template_other_service_widgets: list[tk.Widget] = []
@@ -55,8 +68,11 @@ class AdminPage(tk.Frame):
         self.admin_excel_sync_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
         self.admin_excel_sync_pending_entry_ids: set[str] = set()
         self.admin_retry_button: tk.Button | None = None
+        self.dashboard_daily_sales_points: list[dict] = []
+        self.dashboard_best_sales_date = ""
+        self._admin_excel_poll_after_id: str | None = None
         self._build()
-        self.after(250, self._poll_admin_excel_sync_results)
+        self._admin_excel_poll_after_id = self.after(250, self._poll_admin_excel_sync_results)
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -67,17 +83,23 @@ class AdminPage(tk.Frame):
         self.notebook = ttk.Notebook(self)
         self.notebook.grid(row=1, column=0, sticky="nsew", padx=18, pady=18)
 
+        dashboard_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        employees_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         attendance_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         announcements_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         messages_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         sales_data_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         workbook_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        self.notebook.add(dashboard_tab, text="Dashboard")
+        self.notebook.add(employees_tab, text="Registered Employees")
         self.notebook.add(attendance_tab, text="Attendance")
         self.notebook.add(announcements_tab, text="Announcements")
         self.notebook.add(messages_tab, text="Service Messages")
         self.notebook.add(sales_data_tab, text="Sales Data")
         self.notebook.add(workbook_tab, text="Sales Workbook")
 
+        self._build_dashboard_tab(dashboard_tab)
+        self._build_employees_tab(employees_tab)
         self._build_attendance_tab(attendance_tab)
         self._build_announcements_tab(announcements_tab)
         self._build_message_templates_tab(messages_tab)
@@ -100,6 +122,242 @@ class AdminPage(tk.Frame):
         self.today_pill.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 10))
         make_button(body, "Refresh", self.refresh_all, "primary").grid(row=0, column=2, rowspan=2, padx=(0, 10))
         make_button(body, "Logout", self.app.logout, "light").grid(row=0, column=3, rowspan=2)
+
+    def _build_dashboard_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=3)
+        parent.grid_columnconfigure(1, weight=2)
+        parent.grid_rowconfigure(1, weight=1)
+
+        metrics = tk.Frame(parent, bg=BG)
+        metrics.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="admin_dashboard_metrics")
+        self.dashboard_entries_card = MetricCard(metrics, "Total Entries", "0", BLUE, "All saved sales")
+        self.dashboard_entries_card.grid(row=0, column=0, sticky="ew", padx=(0, 9))
+        self.dashboard_total_sales_card = MetricCard(metrics, "Total Sales", "0", SUCCESS, "All time selling")
+        self.dashboard_total_sales_card.grid(row=0, column=1, sticky="ew", padx=3)
+        self.dashboard_month_sales_card = MetricCard(metrics, "This Month", "0", TEAL, "Current month selling")
+        self.dashboard_month_sales_card.grid(row=0, column=2, sticky="ew", padx=3)
+        self.dashboard_best_day_card = MetricCard(metrics, "Best Sales Day", "0", WARNING, "No sales yet")
+        self.dashboard_best_day_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
+
+        chart_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=BLUE, accent_end=SUCCESS)
+        chart_card.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        chart = chart_card.body
+        chart.grid_columnconfigure(0, weight=1)
+        chart.grid_rowconfigure(1, weight=1)
+
+        chart_header = tk.Frame(chart, bg=WHITE)
+        chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        chart_header.grid_columnconfigure(0, weight=1)
+        tk.Label(chart_header, text="Daily Sales Performance", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.dashboard_chart_subtitle = tk.Label(chart_header, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
+        self.dashboard_chart_subtitle.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        make_button(chart_header, "Refresh", self.refresh_all, "light").grid(row=0, column=1, rowspan=2, sticky="e")
+
+        self.dashboard_sales_canvas = tk.Canvas(chart, bg=WHITE, height=310, bd=0, highlightthickness=0)
+        self.dashboard_sales_canvas.grid(row=1, column=0, sticky="nsew")
+        self.dashboard_sales_canvas.bind("<Configure>", lambda _event: self._draw_dashboard_sales_graph())
+
+        insight_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=NAVY, accent_end=TEAL)
+        insight_card.grid(row=1, column=1, sticky="nsew")
+        insight = insight_card.body
+        insight.grid_columnconfigure(0, weight=1)
+        insight.grid_rowconfigure(3, weight=1)
+        tk.Label(insight, text="Sales Highlights", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w"
+        )
+
+        highlight = tk.Frame(insight, bg="#f8fbff", highlightbackground=LINE, highlightthickness=1, padx=14, pady=12)
+        highlight.grid(row=1, column=0, sticky="ew", pady=(12, 14))
+        highlight.grid_columnconfigure(0, weight=1)
+        self.dashboard_best_day_label = tk.Label(
+            highlight,
+            text="No sales recorded yet",
+            bg="#f8fbff",
+            fg=TEXT,
+            font=(FONT_BOLD, 13),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self.dashboard_best_day_label.grid(row=0, column=0, sticky="ew")
+        self.dashboard_best_day_meta_label = tk.Label(
+            highlight,
+            text="Add sales entries to build the daily performance graph.",
+            bg="#f8fbff",
+            fg=MUTED,
+            font=(FONT, 9),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self.dashboard_best_day_meta_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        self.dashboard_monthly_summary_label = tk.Label(insight, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
+        self.dashboard_monthly_summary_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
+
+        columns = ("month", "entries", "sales", "profit", "best")
+        self.dashboard_monthly_tree = ttk.Treeview(insight, columns=columns, show="headings", height=10, selectmode="none")
+        headings = {
+            "month": "Month",
+            "entries": "Entries",
+            "sales": "Sales",
+            "profit": "Profit",
+            "best": "Best Day",
+        }
+        widths = {"month": 105, "entries": 70, "sales": 95, "profit": 90, "best": 92}
+        for column in columns:
+            self.dashboard_monthly_tree.heading(column, text=headings[column], anchor="w")
+            self.dashboard_monthly_tree.column(
+                column,
+                width=widths[column],
+                minwidth=widths[column],
+                anchor="w",
+                stretch=column == "month",
+            )
+        self.dashboard_monthly_tree.tag_configure("month_even", background=WHITE, foreground=TEXT)
+        self.dashboard_monthly_tree.tag_configure("month_odd", background="#f8fbff", foreground=TEXT)
+        self.dashboard_monthly_tree.tag_configure("month_best", background="#eafaf4", foreground=TEXT)
+        self.dashboard_monthly_tree.grid(row=3, column=0, sticky="nsew")
+        monthly_scroll = ttk.Scrollbar(insight, orient="vertical", command=self.dashboard_monthly_tree.yview)
+        monthly_scroll.grid(row=3, column=1, sticky="ns")
+        self.dashboard_monthly_tree.configure(yscrollcommand=monthly_scroll.set)
+
+    def _build_employees_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=2)
+        parent.grid_columnconfigure(1, weight=3)
+        parent.grid_rowconfigure(0, weight=1)
+
+        form_card = SurfaceCard(parent, padx=22, pady=20, accent=True, accent_start=BLUE, accent_end=TEAL)
+        form_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        form = form_card.body
+        form.grid_columnconfigure(0, weight=1)
+        form_header = tk.Frame(form, bg=WHITE)
+        form_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        form_header.grid_columnconfigure(0, weight=1)
+        self.employee_form_title_label = tk.Label(
+            form_header,
+            text="Add New Employee",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+        )
+        self.employee_form_title_label.grid(row=0, column=0, sticky="w")
+        self.employee_form_hint_label = tk.Label(
+            form,
+            text="Create a new employee login. Leave password blank to auto-generate one.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=340,
+            justify="left",
+        )
+        self.employee_form_hint_label.grid(row=1, column=0, sticky="w", pady=(0, 16))
+
+        self.employee_name_entry = self._employee_entry(form, "Employee Name", self.employee_name_var, 2)
+        self._employee_entry(form, "Username", self.employee_username_var, 4)
+        self._employee_entry(form, "Password", self.employee_password_var, 6)
+        tk.Label(form, text="Account Status", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+            row=8, column=0, sticky="w"
+        )
+        self.employee_active_status_label = tk.Label(
+            form,
+            text="",
+            bg="#eafaf4",
+            fg=SUCCESS,
+            font=(FONT_BOLD, 10),
+            padx=12,
+            pady=7,
+            anchor="w",
+        )
+        self.employee_active_status_label.grid(row=9, column=0, sticky="ew", pady=(8, 14))
+        self._refresh_employee_active_status_label()
+
+        self.employee_password_status_label = tk.Label(
+            form,
+            text="Leave password blank to auto-generate one for new employees.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=340,
+            justify="left",
+        )
+        self.employee_password_status_label.grid(row=10, column=0, sticky="w", pady=(0, 14))
+
+        actions = tk.Frame(form, bg=WHITE)
+        actions.grid(row=11, column=0, sticky="ew")
+        actions.grid_columnconfigure(0, weight=1)
+        self.employee_save_button = make_button(actions, "Add Employee", self.save_employee_user, "primary")
+        self.employee_save_button.grid(row=0, column=0, sticky="ew")
+
+        more_actions = tk.Frame(form, bg=WHITE)
+        more_actions.grid(row=12, column=0, sticky="ew", pady=(14, 0))
+        more_actions.grid_columnconfigure((0, 1, 2), weight=1)
+        make_button(more_actions, "Freeze / Unfreeze", self.toggle_selected_employee_active, "light").grid(
+            row=0, column=0, sticky="ew", padx=(0, 6)
+        )
+        make_button(more_actions, "Reset Password", self.reset_selected_employee_password, "warning").grid(
+            row=0, column=1, sticky="ew", padx=6
+        )
+        make_button(more_actions, "Remove Employee", self.remove_selected_employee, "danger").grid(
+            row=0, column=2, sticky="ew", padx=(6, 0)
+        )
+
+        list_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        list_card.grid(row=0, column=1, sticky="nsew")
+        listing = list_card.body
+        listing.grid_columnconfigure(0, weight=1)
+        listing.grid_rowconfigure(1, weight=1)
+        listing_header = tk.Frame(listing, bg=WHITE)
+        listing_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        listing_header.grid_columnconfigure(0, weight=1)
+        tk.Label(listing_header, text="Registered Employees", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.employee_count_label = tk.Label(listing_header, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
+        self.employee_count_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        make_button(listing_header, "New Employee", self.start_new_employee_form, "success").grid(
+            row=0, column=1, rowspan=2, sticky="e"
+        )
+        self.employees_tree = ttk.Treeview(
+            listing,
+            columns=("name", "username", "password", "status"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.employees_tree.heading("name", text="Name", anchor="w")
+        self.employees_tree.heading("username", text="Username", anchor="w")
+        self.employees_tree.heading("password", text="Password", anchor="w")
+        self.employees_tree.heading("status", text="Status", anchor="w")
+        self.employees_tree.column("name", width=260, minwidth=180, anchor="w", stretch=True)
+        self.employees_tree.column("username", width=170, minwidth=140, anchor="w", stretch=False)
+        self.employees_tree.column("password", width=150, minwidth=130, anchor="w", stretch=False)
+        self.employees_tree.column("status", width=130, minwidth=110, anchor="w", stretch=False)
+        self.employees_tree.tag_configure("employee_active", background="#eafaf4", foreground=TEXT)
+        self.employees_tree.tag_configure("employee_frozen", background="#fff1f3", foreground=TEXT)
+        self.employees_tree.grid(row=1, column=0, sticky="nsew")
+        self.employees_tree.bind("<<TreeviewSelect>>", self._on_employee_selected)
+        employee_scroll = ttk.Scrollbar(listing, orient="vertical", command=self.employees_tree.yview)
+        employee_scroll.grid(row=1, column=1, sticky="ns")
+        self.employees_tree.configure(yscrollcommand=employee_scroll.set)
+
+    def _employee_entry(self, parent: tk.Misc, label: str, variable: tk.StringVar, row: int) -> tk.Entry:
+        tk.Label(parent, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=row, column=0, sticky="w")
+        entry = tk.Entry(
+            parent,
+            textvariable=variable,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        )
+        entry.grid(row=row + 1, column=0, sticky="ew", ipady=8, pady=(8, 14))
+        return entry
 
     def _build_attendance_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -655,6 +913,8 @@ class AdminPage(tk.Frame):
         self.today_pill.configure(text=today_label())
         self.last_refresh_label.configure(text=f"Last refreshed {datetime.now().strftime('%I:%M %p')}")
         self._refresh_excel_settings()
+        self._refresh_dashboard()
+        self._refresh_employees()
         shifts = self.app.attendance_store.list_shift_summaries()
         self._refresh_metrics(shifts)
         self._refresh_shift_table(shifts)
@@ -662,6 +922,445 @@ class AdminPage(tk.Frame):
         self._refresh_announcements()
         self._refresh_message_templates()
         self._refresh_sales_data()
+
+    def _refresh_dashboard(self) -> None:
+        if not hasattr(self, "dashboard_sales_canvas"):
+            return
+        today = date.today()
+        today_text = today.strftime("%Y-%m-%d")
+        all_entries = self.app.attendance_store.list_sales_entries_between("1900-01-01", today_text)
+        total_sales = sum(self._sales_money_value(entry.get("selling_amount", "")) for entry in all_entries)
+
+        month_start = date(today.year, today.month, 1)
+        month_entries = [
+            entry
+            for entry in all_entries
+            if (entry_date := self._sales_entry_date(entry)) is not None
+            and month_start <= entry_date <= today
+        ]
+        month_sales = sum(self._sales_money_value(entry.get("selling_amount", "")) for entry in month_entries)
+        month_profit = sum(self._sales_money_value(entry.get("profit", "")) for entry in month_entries)
+
+        daily_totals = self._sales_daily_totals(month_entries)
+        best_day, best_day_data = self._best_sales_day(daily_totals)
+        best_day_sales = float(best_day_data.get("sales", 0)) if best_day_data else 0.0
+        best_day_entries = int(best_day_data.get("entries", 0)) if best_day_data else 0
+
+        self.dashboard_entries_card.value_label.configure(text=str(len(all_entries)))
+        self.dashboard_total_sales_card.value_label.configure(text=self._dashboard_money_label(total_sales))
+        self.dashboard_month_sales_card.value_label.configure(text=self._dashboard_money_label(month_sales))
+        self.dashboard_month_sales_card.helper_label.configure(
+            text=f"{calendar.month_name[today.month]} profit {self._dashboard_money_label(month_profit)}"
+        )
+        self.dashboard_best_day_card.value_label.configure(text=self._dashboard_money_label(best_day_sales))
+        self.dashboard_best_day_card.helper_label.configure(
+            text=f"{self._format_date(best_day)} | {best_day_entries} entries" if best_day else "No sales yet"
+        )
+
+        if best_day:
+            self.dashboard_best_day_label.configure(
+                text=f"Highest sales day: {self._format_date(best_day)}",
+                fg=TEXT,
+            )
+            self.dashboard_best_day_meta_label.configure(
+                text=f"{self._dashboard_money_label(best_day_sales)} from {best_day_entries} entries this month.",
+                fg=MUTED,
+            )
+        else:
+            self.dashboard_best_day_label.configure(text="No sales recorded yet", fg=TEXT)
+            self.dashboard_best_day_meta_label.configure(
+                text="Add sales entries to build the daily performance graph.",
+                fg=MUTED,
+            )
+
+        self.dashboard_best_sales_date = best_day or ""
+        self.dashboard_daily_sales_points = self._dashboard_daily_points(today, daily_totals)
+        self.dashboard_chart_subtitle.configure(
+            text=f"{calendar.month_name[today.month]} {today.year} daily selling amount | highest day is highlighted"
+        )
+        self._refresh_dashboard_monthly_table(all_entries, today)
+        self._draw_dashboard_sales_graph()
+
+    def _sales_entry_date(self, entry: dict) -> date | None:
+        try:
+            return datetime.strptime(str(entry.get("entry_date", "")), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def _sales_daily_totals(self, entries: list[dict]) -> dict[str, dict[str, float | int]]:
+        totals: dict[str, dict[str, float | int]] = {}
+        for entry in entries:
+            entry_date = str(entry.get("entry_date", ""))
+            if not entry_date:
+                continue
+            data = totals.setdefault(entry_date, {"sales": 0.0, "profit": 0.0, "entries": 0})
+            data["sales"] = float(data["sales"]) + self._sales_money_value(entry.get("selling_amount", ""))
+            data["profit"] = float(data["profit"]) + self._sales_money_value(entry.get("profit", ""))
+            data["entries"] = int(data["entries"]) + 1
+        return totals
+
+    def _best_sales_day(self, daily_totals: dict[str, dict[str, float | int]]) -> tuple[str, dict[str, float | int]] | tuple[None, None]:
+        if not daily_totals:
+            return None, None
+        best_day = max(
+            daily_totals,
+            key=lambda day: (float(daily_totals[day].get("sales", 0)), int(daily_totals[day].get("entries", 0))),
+        )
+        return best_day, daily_totals[best_day]
+
+    def _dashboard_daily_points(self, today: date, daily_totals: dict[str, dict[str, float | int]]) -> list[dict]:
+        points = []
+        for day in range(1, today.day + 1):
+            current = date(today.year, today.month, day)
+            key = current.strftime("%Y-%m-%d")
+            data = daily_totals.get(key, {"sales": 0.0, "profit": 0.0, "entries": 0})
+            points.append(
+                {
+                    "date": key,
+                    "day": day,
+                    "sales": float(data.get("sales", 0)),
+                    "profit": float(data.get("profit", 0)),
+                    "entries": int(data.get("entries", 0)),
+                }
+            )
+        return points
+
+    def _refresh_dashboard_monthly_table(self, all_entries: list[dict], today: date) -> None:
+        if not hasattr(self, "dashboard_monthly_tree"):
+            return
+        month_entries: dict[int, list[dict]] = {month: [] for month in range(1, today.month + 1)}
+        for entry in all_entries:
+            entry_date = self._sales_entry_date(entry)
+            if entry_date is None or entry_date.year != today.year or entry_date.month > today.month:
+                continue
+            month_entries.setdefault(entry_date.month, []).append(entry)
+
+        for item in self.dashboard_monthly_tree.get_children():
+            self.dashboard_monthly_tree.delete(item)
+
+        month_rows = []
+        for month in range(1, today.month + 1):
+            entries = month_entries.get(month, [])
+            sales = sum(self._sales_money_value(entry.get("selling_amount", "")) for entry in entries)
+            profit = sum(self._sales_money_value(entry.get("profit", "")) for entry in entries)
+            daily_totals = self._sales_daily_totals(entries)
+            best_day, best_day_data = self._best_sales_day(daily_totals)
+            best_label = "-"
+            if best_day and best_day_data:
+                best_label = datetime.strptime(best_day, "%Y-%m-%d").strftime("%d %b")
+            month_rows.append((month, entries, sales, profit, best_label))
+
+        best_month_row = max((row for row in month_rows if row[2] > 0), key=lambda row: row[2], default=None)
+        for index, (month, entries, sales, profit, best_label) in enumerate(month_rows):
+            tag = "month_best" if best_month_row and month == best_month_row[0] else (
+                "month_even" if index % 2 == 0 else "month_odd"
+            )
+            self.dashboard_monthly_tree.insert(
+                "",
+                "end",
+                iid=str(month),
+                tags=(tag,),
+                values=(
+                    calendar.month_name[month],
+                    str(len(entries)),
+                    self._dashboard_money_label(sales),
+                    self._dashboard_money_label(profit),
+                    best_label,
+                ),
+            )
+        self.dashboard_monthly_summary_label.configure(text=f"Monthly sales overview for {today.year}")
+
+    def _dashboard_money_label(self, amount: float) -> str:
+        return f"Rs. {money_label(str(amount))}"
+
+    def _draw_dashboard_sales_graph(self) -> None:
+        canvas = getattr(self, "dashboard_sales_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        points = self.dashboard_daily_sales_points
+        if not points:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="No sales data yet",
+                fill=MUTED,
+                font=(FONT_BOLD, 12),
+            )
+            return
+
+        left = 54
+        right = 22
+        top = 28
+        bottom = 44
+        chart_width = max(width - left - right, 1)
+        chart_height = max(height - top - bottom, 1)
+        max_sales = max((float(point["sales"]) for point in points), default=0.0)
+        if max_sales <= 0:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="No selling amount recorded for this month yet",
+                fill=MUTED,
+                font=(FONT_BOLD, 12),
+            )
+            return
+
+        for step in range(5):
+            ratio = step / 4
+            y = top + chart_height - (chart_height * ratio)
+            value = max_sales * ratio
+            canvas.create_line(left, y, width - right, y, fill="#e8eef6", width=1)
+            canvas.create_text(left - 10, y, text=money_label(str(value)), fill=MUTED, font=(FONT, 8), anchor="e")
+
+        canvas.create_line(left, top, left, top + chart_height, fill=LINE)
+        canvas.create_line(left, top + chart_height, width - right, top + chart_height, fill=LINE)
+
+        slot = chart_width / max(len(points), 1)
+        bar_width = max(6, min(26, slot * 0.58))
+        label_interval = max(1, len(points) // 6)
+        for index, point in enumerate(points):
+            sales = float(point["sales"])
+            bar_height = (sales / max_sales) * chart_height
+            x_center = left + slot * index + slot / 2
+            x1 = x_center - bar_width / 2
+            x2 = x_center + bar_width / 2
+            y1 = top + chart_height - bar_height
+            y2 = top + chart_height
+            is_best = point["date"] == self.dashboard_best_sales_date
+            fill = SUCCESS if is_best else BLUE
+            canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+            if is_best:
+                canvas.create_text(
+                    x_center,
+                    max(top + 10, y1 - 14),
+                    text="Best",
+                    fill=SUCCESS,
+                    font=(FONT_BOLD, 8),
+                )
+            day_number = int(point["day"])
+            if index == 0 or index == len(points) - 1 or day_number % label_interval == 0:
+                canvas.create_text(x_center, y2 + 16, text=str(day_number), fill=MUTED, font=(FONT, 8))
+
+        canvas.create_text(
+            left,
+            8,
+            text="Selling amount by day",
+            fill=TEXT,
+            font=(FONT_BOLD, 10),
+            anchor="nw",
+        )
+
+    def _refresh_employee_form_mode(self) -> None:
+        editing = self.selected_employee_username is not None
+        if self.employee_form_title_label is not None:
+            self.employee_form_title_label.configure(text="Edit Employee" if editing else "Add New Employee")
+        if self.employee_form_hint_label is not None:
+            self.employee_form_hint_label.configure(
+                text=(
+                    "Editing selected employee. Type a password only if you want to replace it."
+                    if editing
+                    else "Create a new employee login. Leave password blank to auto-generate one."
+                ),
+                fg=BLUE if editing else MUTED,
+            )
+        if self.employee_save_button is not None:
+            self.employee_save_button.configure(text="Save Employee" if editing else "Add Employee")
+
+    def start_new_employee_form(self) -> None:
+        self.clear_employee_form(focus_name=True)
+
+    def _refresh_employee_active_status_label(self) -> None:
+        label = self.employee_active_status_label
+        if label is None:
+            return
+        if self.employee_active_var.get():
+            label.configure(text="Employee Account is Active", fg=SUCCESS, bg="#eafaf4")
+        else:
+            label.configure(text="Employee Account is Not Active", fg=DANGER, bg="#fff1f3")
+
+    def _refresh_employees(self) -> None:
+        for item in self.employees_tree.get_children():
+            self.employees_tree.delete(item)
+        users = self.app.auth.list_users(include_admin=False)
+        if self.employee_count_label is not None:
+            employee_text = "employee" if len(users) == 1 else "employees"
+            self.employee_count_label.configure(text=f"{len(users)} registered {employee_text}")
+        valid_usernames = set()
+        for user in users:
+            username = user["username"]
+            valid_usernames.add(username)
+            status = "Active" if user["is_active"] else "Not Active"
+            tag = "employee_active" if user["is_active"] else "employee_frozen"
+            self.employees_tree.insert(
+                "",
+                "end",
+                iid=username,
+                tags=(tag,),
+                values=(
+                    user["display_name"],
+                    username,
+                    "Protected",
+                    status,
+                ),
+            )
+        if self.selected_employee_username not in valid_usernames:
+            self.clear_employee_form()
+
+    def _on_employee_selected(self, _event: tk.Event) -> None:
+        selection = self.employees_tree.selection()
+        if not selection:
+            return
+        username = selection[0]
+        user = self.app.auth.get_user(username)
+        if user is None:
+            return
+        self.selected_employee_username = username
+        self.employee_name_var.set(user["display_name"])
+        self.employee_username_var.set(user["username"])
+        self.employee_password_var.set("")
+        self.employee_active_var.set(bool(user["is_active"]))
+        self._refresh_employee_active_status_label()
+        self._refresh_employee_form_mode()
+        if self.employee_password_status_label is not None:
+            self.employee_password_status_label.configure(
+                text="Password is protected. Use Reset Password to generate or set a new one.",
+                fg=MUTED,
+            )
+
+    def clear_employee_form(self, focus_name: bool = False) -> None:
+        self.selected_employee_username = None
+        self.employee_name_var.set("")
+        self.employee_username_var.set("")
+        self.employee_password_var.set("")
+        self.employee_active_var.set(True)
+        self._refresh_employee_active_status_label()
+        self._refresh_employee_form_mode()
+        if self.employee_password_status_label is not None:
+            self.employee_password_status_label.configure(
+                text="Leave password blank to auto-generate one for new employees.",
+                fg=MUTED,
+            )
+        if hasattr(self, "employees_tree"):
+            self.employees_tree.selection_remove(*self.employees_tree.selection())
+        if focus_name and self.employee_name_entry is not None:
+            self.employee_name_entry.focus_set()
+
+    def save_employee_user(self) -> None:
+        name = self.employee_name_var.get().strip()
+        username = self.employee_username_var.get().strip()
+        password = self.employee_password_var.get().strip()
+        if not username:
+            show_app_alert(self, "Missing username", "Please add a username.", "warning")
+            return
+        if self.selected_employee_username is None:
+            ok, message, created_password = self.app.auth.create_user(name, username, password or None)
+            if not ok:
+                show_app_alert(self, "Employee not saved", message, "warning")
+                return
+            self.employee_password_var.set(created_password)
+            if self.employee_password_status_label is not None:
+                self.employee_password_status_label.configure(
+                    text=f"New password: {created_password}",
+                    fg=SUCCESS,
+                )
+            self.selected_employee_username = username
+            self.employee_active_var.set(True)
+            self._refresh_employee_active_status_label()
+            self._refresh_employee_form_mode()
+            self._refresh_employees()
+            self.employees_tree.selection_set(username)
+            show_app_alert(self, "Employee added", "Employee can now log in with the shown password.", "success")
+            return
+
+        if password and len(password) < 8:
+            show_app_alert(self, "Password too short", "Password must be at least 8 characters.", "warning")
+            return
+        ok, message = self.app.auth.update_user(
+            self.selected_employee_username,
+            name,
+            username,
+            self.employee_active_var.get(),
+        )
+        if not ok:
+            show_app_alert(self, "Employee not saved", message, "warning")
+            return
+        password_changed = False
+        if password:
+            ok, password_message, saved_password = self.app.auth.reset_user_password(username, password)
+            if not ok:
+                show_app_alert(self, "Password not saved", password_message, "warning")
+                return
+            self.employee_password_var.set(saved_password)
+            password_changed = True
+            if self.employee_password_status_label is not None:
+                self.employee_password_status_label.configure(text=f"New password: {saved_password}", fg=SUCCESS)
+        else:
+            self.employee_password_var.set("")
+        self.selected_employee_username = username
+        self._refresh_employee_active_status_label()
+        self._refresh_employee_form_mode()
+        self._refresh_employees()
+        self.employees_tree.selection_set(username)
+        alert_message = "Employee details and password were updated." if password_changed else message
+        show_app_alert(self, "Employee updated", alert_message, "success")
+
+    def reset_selected_employee_password(self) -> None:
+        username = self.selected_employee_username
+        if not username:
+            show_app_alert(self, "No employee selected", "Select an employee first.", "warning")
+            return
+        requested_password = self.employee_password_var.get().strip() or None
+        ok, message, new_password = self.app.auth.reset_user_password(username, requested_password)
+        if not ok:
+            show_app_alert(self, "Password not reset", message, "warning")
+            return
+        self.employee_password_var.set(new_password)
+        if self.employee_password_status_label is not None:
+            self.employee_password_status_label.configure(text=f"New password: {new_password}", fg=SUCCESS)
+        show_app_alert(self, "Password reset", "Give the shown password to the employee.", "success")
+
+    def toggle_selected_employee_active(self) -> None:
+        username = self.selected_employee_username
+        if not username:
+            show_app_alert(self, "No employee selected", "Select an employee first.", "warning")
+            return
+        user = self.app.auth.get_user(username)
+        if user is None:
+            show_app_alert(self, "Missing employee", "The selected employee could not be found.", "warning")
+            return
+        new_state = not bool(user["is_active"])
+        ok, message = self.app.auth.set_user_active(username, new_state)
+        if not ok:
+            show_app_alert(self, "Status not changed", message, "warning")
+            return
+        self.employee_active_var.set(new_state)
+        self._refresh_employee_active_status_label()
+        self._refresh_employees()
+        self.employees_tree.selection_set(username)
+        status = "active" if new_state else "frozen"
+        show_app_alert(self, "Employee updated", f"Employee is now {status}.", "success")
+
+    def remove_selected_employee(self) -> None:
+        username = self.selected_employee_username
+        if not username:
+            show_app_alert(self, "No employee selected", "Select an employee first.", "warning")
+            return
+        if not messagebox.askyesno(
+            "Remove employee",
+            f"Remove '{username}' from the application login list?",
+            parent=self,
+        ):
+            return
+        ok, message = self.app.auth.delete_user(username)
+        if not ok:
+            show_app_alert(self, "Employee not removed", message, "warning")
+            return
+        self.clear_employee_form()
+        self._refresh_employees()
+        show_app_alert(self, "Employee removed", message, "success")
 
     def send_announcement(self) -> None:
         title = self.announcement_title_var.get().strip()
@@ -1084,13 +1783,15 @@ class AdminPage(tk.Frame):
         self.admin_excel_sync_results.put((entry, sync_result))
 
     def _poll_admin_excel_sync_results(self) -> None:
+        if not self.winfo_exists():
+            return
         while True:
             try:
                 entry, sync_result = self.admin_excel_sync_results.get_nowait()
             except queue.Empty:
                 break
             self._finish_admin_excel_sync(entry, sync_result)
-        self.after(250, self._poll_admin_excel_sync_results)
+        self._admin_excel_poll_after_id = self.after(250, self._poll_admin_excel_sync_results)
 
     def _finish_admin_excel_sync(self, entry: dict, sync_result: ExcelSyncResult) -> None:
         entry_id = str(entry.get("id", ""))
@@ -1110,6 +1811,15 @@ class AdminPage(tk.Frame):
                     show_app_alert(self, "Excel sync failed", message, "warning")
         finally:
             self._refresh_sales_data()
+
+    def destroy(self) -> None:
+        if self._admin_excel_poll_after_id is not None:
+            try:
+                self.after_cancel(self._admin_excel_poll_after_id)
+            except tk.TclError:
+                pass
+            self._admin_excel_poll_after_id = None
+        super().destroy()
 
     def _on_template_selected(self, _event: tk.Event) -> None:
         selection = self.templates_tree.selection()

@@ -67,6 +67,8 @@ class AttendanceStore:
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
         except Exception:
@@ -79,6 +81,7 @@ class AttendanceStore:
 
     def _init_schema(self) -> None:
         with self.connect() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS attendance_days (
@@ -854,6 +857,47 @@ class AttendanceStore:
                 VALUES (?, ?, ?)
                 """,
                 [(announcement_id, employee_username, read_at) for announcement_id in announcement_ids],
+            )
+
+    def merge_announcement_read_aliases(self, employee_username: str, aliases: list[str]) -> None:
+        canonical_username = employee_username.strip()
+        normalized_aliases = []
+        seen_aliases = set()
+        for alias in aliases:
+            normalized = alias.strip()
+            normalized_key = normalized.casefold()
+            if not normalized or normalized_key == canonical_username.casefold() or normalized_key in seen_aliases:
+                continue
+            normalized_aliases.append(normalized)
+            seen_aliases.add(normalized_key)
+        if not canonical_username or not normalized_aliases:
+            return
+
+        placeholders = ", ".join("?" for _ in normalized_aliases)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT announcement_id, MIN(read_at) AS read_at
+                FROM announcement_reads
+                WHERE employee_username IN ({placeholders})
+                GROUP BY announcement_id
+                """,
+                tuple(normalized_aliases),
+            ).fetchall()
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO announcement_reads
+                (announcement_id, employee_username, read_at)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (int(row["announcement_id"]), canonical_username, row["read_at"] or _iso())
+                    for row in rows
+                ],
+            )
+            connection.execute(
+                f"DELETE FROM announcement_reads WHERE employee_username IN ({placeholders})",
+                tuple(normalized_aliases),
             )
 
     def create_service_message_template(

@@ -7,11 +7,15 @@ import sys
 
 APP_NAME = "Digital Service Pakistan Employee App"
 BUSINESS_NAME = "DIGITAL SERVICE PAKISTAN"
-DEFAULT_USERNAME = "masabiha"
-DEFAULT_PASSWORD = "Employee@7260"
-ADMIN_USERNAME = "KillerPanel"
-ADMIN_PASSWORD = "Compiler@Panel@675"
-RESET_CODE = "2004212802"
+APP_VERSION = "0.1.0"
+UPDATE_REPO_OWNER = os.environ.get("DSP_UPDATE_REPO_OWNER", "ZerO4837")
+UPDATE_REPO_NAME = os.environ.get("DSP_UPDATE_REPO_NAME", "Employee-Management")
+UPDATE_BRANCH = os.environ.get("DSP_UPDATE_BRANCH", "main")
+DEFAULT_USERNAME = os.environ.get("DSP_DEFAULT_USERNAME", "masabiha")
+DEFAULT_PASSWORD = os.environ.get("DSP_DEFAULT_PASSWORD", "")
+ADMIN_USERNAME = os.environ.get("DSP_ADMIN_USERNAME", "KillerPanel")
+ADMIN_PASSWORD = os.environ.get("DSP_ADMIN_PASSWORD", "")
+RESET_CODE = os.environ.get("DSP_RESET_CODE", "")
 
 def _source_root() -> Path:
     return Path(__file__).resolve().parent.parent

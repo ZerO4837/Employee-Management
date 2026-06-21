@@ -1,7 +1,23 @@
 __pycache__/
-*.pyc
-data/
+*.py[cod]
 .venv/
-dist/
+venv/
+
+# Local app data and secrets
+data/
+*.sqlite3
+*.db
+auth_config.json
+bootstrap_credentials.txt
+.env
+
+# Local Excel workbooks
+*.xlsx
+*.xlsm
+~$*
+
+# Build outputs
 build/
+dist/
 *.spec
+update_error.log

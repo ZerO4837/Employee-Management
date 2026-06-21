@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import queue
+import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 try:
     from PIL import Image, ImageOps, ImageTk
@@ -24,6 +26,7 @@ from app.config import (
 )
 from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
+from app.updater import UpdateInfo, check_for_update, start_update_and_relaunch
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
@@ -45,8 +48,12 @@ class EmployeeApp(tk.Tk):
         self.load_sales_workbook_settings()
         self.logo_cache: dict[tuple[int, int], tk.PhotoImage] = {}
         self.current_user = ""
+        self.current_display_name = ""
         self.current_role = ""
         self.close_waiting_for_excel_sync = False
+        self.update_check_queue: queue.Queue[UpdateInfo] = queue.Queue()
+        self.update_check_started = False
+        self.update_check_after_id: str | None = None
 
         self._configure_style()
         self._set_window_icon()
@@ -81,7 +88,8 @@ class EmployeeApp(tk.Tk):
             return self.logo_cache[size]
         if Image is None or ImageOps is None or ImageTk is None or not LOGO_PATH.exists():
             return None
-        image = Image.open(LOGO_PATH).convert("RGB")
+        with Image.open(LOGO_PATH) as source:
+            image = source.convert("RGB")
         resampling = getattr(Image, "Resampling", Image).LANCZOS
         image = ImageOps.fit(image, size, method=resampling)
         photo = ImageTk.PhotoImage(image)
@@ -113,15 +121,24 @@ class EmployeeApp(tk.Tk):
             if hasattr(login_page, "clear_login_error"):
                 login_page.clear_login_error()
             self.current_user = user["username"]
+            self.current_display_name = user.get("display_name", user["username"])
             self.current_role = user["role"]
+            self._normalize_current_user_notification_reads()
             self.show_page("admin" if self.current_role == "admin" else "dashboard")
+            self.after(700, self.start_update_check)
             return
         login_page = self.pages.get("login")
         if hasattr(login_page, "show_login_error"):
-            login_page.show_login_error("Username or password is incorrect. Please check the details and try again.")
+            if self.auth.is_user_inactive(username):
+                login_page.show_login_error(
+                    "Your account is not active. Please contact the admin to reactivate your employee access."
+                )
+            else:
+                login_page.show_login_error("Username or password is incorrect. Please check the details and try again.")
 
     def logout(self) -> None:
         self.current_user = ""
+        self.current_display_name = ""
         self.current_role = ""
         self.show_page("login")
 
@@ -137,9 +154,81 @@ class EmployeeApp(tk.Tk):
         self._finish_close_app()
 
     def _finish_close_app(self) -> None:
+        if self.update_check_after_id is not None:
+            try:
+                self.after_cancel(self.update_check_after_id)
+            except tk.TclError:
+                pass
+            self.update_check_after_id = None
         self.current_user = ""
+        self.current_display_name = ""
         self.current_role = ""
         self.destroy()
+
+    def _normalize_current_user_notification_reads(self) -> None:
+        if not self.current_user:
+            return
+        display_name = self.current_display_name.strip()
+        if not display_name or display_name.casefold() == self.current_user.casefold():
+            return
+        registered_usernames = {
+            user["username"].casefold()
+            for user in self.auth.list_users(include_admin=True)
+        }
+        if display_name.casefold() in registered_usernames:
+            return
+        self.attendance_store.merge_announcement_read_aliases(self.current_user, [display_name])
+
+    def start_update_check(self) -> None:
+        if self.update_check_started:
+            return
+        self.update_check_started = True
+        worker = threading.Thread(target=self._run_update_check_worker, daemon=True)
+        worker.start()
+        self._poll_update_check()
+
+    def _run_update_check_worker(self) -> None:
+        self.update_check_queue.put(check_for_update())
+
+    def _poll_update_check(self) -> None:
+        try:
+            update_info = self.update_check_queue.get_nowait()
+        except queue.Empty:
+            self.update_check_after_id = self.after(250, self._poll_update_check)
+            return
+        self.update_check_after_id = None
+        self._handle_update_check(update_info)
+
+    def _handle_update_check(self, update_info: UpdateInfo) -> None:
+        if not update_info.available:
+            return
+        if not update_info.can_update:
+            messagebox.showinfo(
+                "Update available",
+                (
+                    f"A new release is available: {update_info.latest_version}\n\n"
+                    f"{update_info.message or 'Open GitHub Releases to download it.'}"
+                ),
+                parent=self,
+            )
+            return
+        should_update = messagebox.askyesno(
+            "Update available",
+            (
+                "A new app update is available.\n\n"
+                f"Current: {update_info.current_version}\n"
+                f"Latest: {update_info.latest_version}\n\n"
+                "Update now? The app will close, update, and reopen automatically."
+            ),
+            parent=self,
+        )
+        if not should_update:
+            return
+        started, message = start_update_and_relaunch(update_info)
+        if not started:
+            messagebox.showwarning("Update could not start", message, parent=self)
+            return
+        self._finish_close_app()
 
     def load_sales_workbook_settings(self) -> None:
         workbook_path = self.attendance_store.get_setting("sales_workbook_path", str(SALES_WORKBOOK_PATH))
@@ -152,8 +241,12 @@ class EmployeeApp(tk.Tk):
         self.sales_workbook = SalesWorkbook(workbook_path, worksheet_name)
 
     @property
-    def display_user(self) -> str:
+    def data_user(self) -> str:
         return self.current_user or DEFAULT_USERNAME
+
+    @property
+    def display_user(self) -> str:
+        return self.current_display_name or self.current_user or DEFAULT_USERNAME
 
 
 def main() -> None:

@@ -9,31 +9,25 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Default login:
+Set private credentials locally before first use. Do not commit real passwords to GitHub.
 
-```text
-Username: masabiha
-Password: Employee@7260
+```powershell
+$env:DSP_DEFAULT_PASSWORD="your-employee-password"
+$env:DSP_ADMIN_PASSWORD="your-admin-password"
+$env:DSP_RESET_CODE="your-private-reset-code"
+python main.py
 ```
 
-Admin login:
+If these environment variables are not set on first run, the app generates local bootstrap credentials in the app data folder. Keep that file private and rotate the password from inside the app.
 
-```text
-Username: KillerPanel
-Password: Compiler@Panel@675
-```
-
-Forgot-password private code:
-
-```text
-2004212802
-```
+The public repository must not contain local files from `data/`, `auth_config.json`, `bootstrap_credentials.txt`, `.env`, or real Excel workbooks. These are ignored by `.gitignore`.
 
 ## Current Scope
 
 This first version builds a polished, modular UI and local screen flow:
 
 - Login and password reset
+- Admin-managed registered employees with freeze, edit, reset-password, and remove actions
 - Separate admin panel login
 - Auto logout on app close
 - Attendance day start / end
@@ -63,6 +57,39 @@ The employee dashboard includes a `Notes` section with two notepad-style areas:
 - `Permanent Notes` are saved as one long-running note per employee for must-remember details.
 
 Both note types are stored locally in SQLite and stay available after restarting the app.
+
+## Updates With GitHub Releases
+
+The app checks the configured GitHub repository's latest release after login:
+
+```text
+https://github.com/ZerO4837/Employee-Management
+```
+
+If the latest release tag is newer than `APP_VERSION` in `app/config.py`, the employee sees an update prompt. Choosing update closes the app, downloads the release asset, applies it, and reopens the app automatically.
+
+Release asset support:
+
+- `.zip`: extracted over the app folder while keeping local `data/`, `.env`, auth files, and Git metadata untouched.
+- `.exe`: downloaded and run as an installer/updater.
+- `.msi`: downloaded and run with `msiexec /i`.
+
+For each update:
+
+1. Increase `APP_VERSION` in `app/config.py`.
+2. Build/package the app update.
+3. Create a GitHub Release with a higher tag, such as `v0.1.1`.
+4. Upload one update asset (`.zip`, `.exe`, or `.msi`) to that release.
+
+If update installation fails, the app writes `update_error.log` locally and still reopens.
+
+## Security Notes
+
+Anyone can download a public repository, so do not store real passwords, reset codes, OneDrive workbook URLs, or local SQLite data in GitHub. The application code alone cannot write to your business workbook unless that computer also has the workbook target/settings and valid OneDrive access.
+
+Authentication data is stored locally in `auth_config.json` using password hashes. New hashes use PBKDF2; older SHA-256 hashes are upgraded after a successful login.
+
+The admin panel's `Registered Employees` tab can add employees, edit their name/username/status, freeze accounts, reset passwords, and remove employees. Existing passwords are not displayed because they are stored as hashes; when an admin creates or resets a user, the newly generated/entered password is shown at that moment.
 
 ## Sales Excel Sync
 
