@@ -40,6 +40,7 @@ This first version builds a polished, modular UI and local screen flow:
 - Attendance check in / check out
 - First-shift close and second/night-shift tracking on the same day
 - Break start / end
+- Employee Notes section with daily notes and permanent notes saved in SQLite
 - Admin attendance sheet with shift summaries and event timeline
 - Admin-to-employee announcements
 - Admin-managed client message templates for services such as Capcut, Adobe, and VPN
@@ -53,6 +54,15 @@ This first version builds a polished, modular UI and local screen flow:
 - Employee-facing sales numbering resets every day (`#1`, `#2`, etc. per date)
 - 5-day day-card selector with a focused entries table for the selected date
 - Edit recent entries without employee delete access
+
+## Employee Notes
+
+The employee dashboard includes a `Notes` section with two notepad-style areas:
+
+- `Daily Notes` are saved by employee and date, so each day can have its own note and older daily notes remain available from the saved notes list.
+- `Permanent Notes` are saved as one long-running note per employee for must-remember details.
+
+Both note types are stored locally in SQLite and stay available after restarting the app.
 
 ## Sales Excel Sync
 

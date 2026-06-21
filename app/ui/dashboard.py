@@ -95,6 +95,13 @@ class DashboardPage(tk.Frame):
         self.message_detail_meta_label: tk.Label | None = None
         self.message_count_label: tk.Label | None = None
         self.message_copy_status_label: tk.Label | None = None
+        self.notes_selected_date = self._sales_date()
+        self.daily_note_text: tk.Text | None = None
+        self.permanent_note_text: tk.Text | None = None
+        self.daily_note_status_label: tk.Label | None = None
+        self.permanent_note_status_label: tk.Label | None = None
+        self.daily_note_date_label: tk.Label | None = None
+        self.daily_notes_tree: ttk.Treeview | None = None
         self.sales_entries: list[dict[str, str]] = []
         self.sales_selected_date = self._sales_date()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
@@ -203,6 +210,7 @@ class DashboardPage(tk.Frame):
         nav_items = [
             ("overview", "Dashboard"),
             ("attendance", "Attendance"),
+            ("notes", "Notes"),
             ("messages", "Client Messages"),
             ("sales", "Sold Item Entry"),
             ("today", "5-Day Data"),
@@ -280,6 +288,7 @@ class DashboardPage(tk.Frame):
 
         self.views["overview"] = self._build_overview_view()
         self.views["attendance"] = self._build_attendance_view()
+        self.views["notes"] = self._build_notes_view()
         self.views["messages"] = self._build_messages_view()
         self.views["sales"] = self._build_sales_view()
         self.views["today"] = self._build_today_view()
@@ -450,6 +459,132 @@ class DashboardPage(tk.Frame):
         self.attendance_tree.column("event", width=160, anchor="w")
         self.attendance_tree.column("details", width=520, anchor="w")
         self.attendance_tree.grid(row=1, column=0, sticky="nsew")
+        return view
+
+    def _build_notes_view(self) -> tk.Frame:
+        view = tk.Frame(self.content, bg=BG)
+        view.grid_columnconfigure(0, weight=1)
+        view.grid_rowconfigure(1, weight=1)
+
+        banner = GradientBanner(
+            view,
+            "Notes",
+            "Keep daily reminders and permanent must-remember details in one private workspace.",
+            height=118,
+            start=NAVY,
+            end=BLUE,
+        )
+        banner.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+
+        workspace = tk.Frame(view, bg=BG)
+        workspace.grid(row=1, column=0, sticky="nsew")
+        workspace.grid_columnconfigure(0, weight=1)
+        workspace.grid_columnconfigure(1, weight=1)
+        workspace.grid_rowconfigure(0, weight=3)
+        workspace.grid_rowconfigure(1, weight=2)
+
+        daily_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=BLUE, accent_end=TEAL)
+        daily_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=(0, 14))
+        daily = daily_card.body
+        daily.grid_columnconfigure(0, weight=1)
+        daily.grid_rowconfigure(2, weight=1)
+        daily_header = tk.Frame(daily, bg=WHITE)
+        daily_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        daily_header.grid_columnconfigure(0, weight=1)
+        tk.Label(daily_header, text="Daily Notes", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.daily_note_date_label = status_pill(daily_header, "", fg=BLUE_DARK, bg="#eef6ff")
+        self.daily_note_date_label.grid(row=0, column=1, sticky="e")
+        self.daily_note_status_label = tk.Label(daily, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.daily_note_status_label.grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self.daily_note_text = tk.Text(
+            daily,
+            bg="#fbfdff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+            wrap="word",
+            padx=12,
+            pady=12,
+            undo=True,
+        )
+        self.daily_note_text.grid(row=2, column=0, sticky="nsew")
+        daily_scroll = ttk.Scrollbar(daily, orient="vertical", command=self.daily_note_text.yview)
+        daily_scroll.grid(row=2, column=1, sticky="ns")
+        self.daily_note_text.configure(yscrollcommand=daily_scroll.set)
+        self.daily_note_text.bind("<Control-s>", lambda _event: self._save_daily_note_from_shortcut())
+        make_button(daily, "Save Daily Note", self.save_daily_note, "primary").grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+        )
+
+        permanent_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        permanent_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=(0, 14))
+        permanent = permanent_card.body
+        permanent.grid_columnconfigure(0, weight=1)
+        permanent.grid_rowconfigure(2, weight=1)
+        tk.Label(permanent, text="Permanent Notes", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.permanent_note_status_label = tk.Label(permanent, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.permanent_note_status_label.grid(row=1, column=0, sticky="w", pady=(12, 8))
+        self.permanent_note_text = tk.Text(
+            permanent,
+            bg="#fbfdff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+            wrap="word",
+            padx=12,
+            pady=12,
+            undo=True,
+        )
+        self.permanent_note_text.grid(row=2, column=0, sticky="nsew")
+        permanent_scroll = ttk.Scrollbar(permanent, orient="vertical", command=self.permanent_note_text.yview)
+        permanent_scroll.grid(row=2, column=1, sticky="ns")
+        self.permanent_note_text.configure(yscrollcommand=permanent_scroll.set)
+        self.permanent_note_text.bind("<Control-s>", lambda _event: self._save_permanent_note_from_shortcut())
+        make_button(permanent, "Save Permanent Note", self.save_permanent_note, "success").grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+        )
+
+        history_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=WARNING, accent_end=TEAL)
+        history_card.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        history = history_card.body
+        history.grid_columnconfigure(0, weight=1)
+        history.grid_rowconfigure(1, weight=1)
+        history_header = tk.Frame(history, bg=WHITE)
+        history_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        history_header.grid_columnconfigure(0, weight=1)
+        tk.Label(history_header, text="Saved Daily Notes", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w"
+        )
+        make_button(history_header, "Open Today's Note", self.open_today_note, "light").grid(row=0, column=1, sticky="e")
+        self.daily_notes_tree = ttk.Treeview(
+            history,
+            columns=("date", "updated", "preview"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.daily_notes_tree.heading("date", text="Date")
+        self.daily_notes_tree.heading("updated", text="Updated")
+        self.daily_notes_tree.heading("preview", text="Preview")
+        self.daily_notes_tree.column("date", width=135, minwidth=120, anchor="w", stretch=False)
+        self.daily_notes_tree.column("updated", width=145, minwidth=130, anchor="w", stretch=False)
+        self.daily_notes_tree.column("preview", width=620, minwidth=260, anchor="w", stretch=True)
+        self.daily_notes_tree.tag_configure("note_even", background=WHITE, foreground=TEXT)
+        self.daily_notes_tree.tag_configure("note_odd", background="#f8fbff", foreground=TEXT)
+        self.daily_notes_tree.grid(row=1, column=0, sticky="nsew")
+        self.daily_notes_tree.bind("<<TreeviewSelect>>", self._on_daily_note_selected)
+        notes_scroll = ttk.Scrollbar(history, orient="vertical", command=self.daily_notes_tree.yview)
+        notes_scroll.grid(row=1, column=1, sticky="ns")
+        self.daily_notes_tree.configure(yscrollcommand=notes_scroll.set)
         return view
 
     def _build_messages_view(self) -> tk.Frame:
@@ -1016,6 +1151,143 @@ class DashboardPage(tk.Frame):
         self._refresh_selected_sales_day_header()
         self._refresh_today_table()
 
+    def _refresh_notes(self) -> None:
+        if self.daily_note_text is not None and not self.daily_note_text.edit_modified():
+            self._load_daily_note(self.notes_selected_date, force=True)
+        if self.permanent_note_text is not None and not self.permanent_note_text.edit_modified():
+            self._load_permanent_note()
+        self._refresh_daily_notes_history()
+
+    def _load_daily_note(self, note_date: str, force: bool = False) -> None:
+        if self.daily_note_text is None:
+            return
+        if not force and self.daily_note_text.edit_modified():
+            if not messagebox.askyesno(
+                "Unsaved daily note",
+                "Load another daily note and discard unsaved changes?",
+                parent=self,
+            ):
+                return
+        self.notes_selected_date = note_date
+        note = self.app.attendance_store.get_employee_note(self._employee_username(), "daily", note_date)
+        self.daily_note_text.delete("1.0", tk.END)
+        self.daily_note_text.insert("1.0", note.get("content", ""))
+        self.daily_note_text.edit_modified(False)
+        if self.daily_note_date_label is not None:
+            self.daily_note_date_label.configure(text=self._format_note_date(note_date))
+        if self.daily_note_status_label is not None:
+            updated = note.get("updated_at", "")
+            status = f"Saved {self._format_note_updated(updated)}" if updated else "No note saved for this date yet"
+            self.daily_note_status_label.configure(text=status, fg=MUTED)
+
+    def _load_permanent_note(self) -> None:
+        if self.permanent_note_text is None:
+            return
+        note = self.app.attendance_store.get_employee_note(self._employee_username(), "permanent")
+        self.permanent_note_text.delete("1.0", tk.END)
+        self.permanent_note_text.insert("1.0", note.get("content", ""))
+        self.permanent_note_text.edit_modified(False)
+        if self.permanent_note_status_label is not None:
+            updated = note.get("updated_at", "")
+            status = f"Saved {self._format_note_updated(updated)}" if updated else "No permanent note saved yet"
+            self.permanent_note_status_label.configure(text=status, fg=MUTED)
+
+    def _refresh_daily_notes_history(self) -> None:
+        if self.daily_notes_tree is None:
+            return
+        for item in self.daily_notes_tree.get_children():
+            self.daily_notes_tree.delete(item)
+        notes = self.app.attendance_store.list_employee_daily_notes(self._employee_username(), limit=60)
+        for index, note in enumerate(notes):
+            note_date = note["note_date"]
+            tag = "note_even" if index % 2 == 0 else "note_odd"
+            self.daily_notes_tree.insert(
+                "",
+                "end",
+                iid=note_date,
+                tags=(tag,),
+                values=(
+                    self._format_note_date(note_date),
+                    self._format_note_updated(note["updated_at"]),
+                    self._note_preview(note.get("content", "")),
+                ),
+            )
+
+    def _on_daily_note_selected(self, _event: tk.Event) -> None:
+        if self.daily_notes_tree is None:
+            return
+        selection = self.daily_notes_tree.selection()
+        if not selection:
+            return
+        self._load_daily_note(selection[0])
+
+    def open_today_note(self) -> None:
+        self._load_daily_note(self._sales_date())
+        if self.daily_notes_tree is not None:
+            self.daily_notes_tree.selection_remove(*self.daily_notes_tree.selection())
+
+    def save_daily_note(self) -> None:
+        if self.daily_note_text is None:
+            return
+        content = self.daily_note_text.get("1.0", "end-1c")
+        saved = self.app.attendance_store.save_employee_note(
+            self._employee_username(),
+            "daily",
+            content,
+            self.notes_selected_date,
+        )
+        self.daily_note_text.edit_modified(False)
+        if self.daily_note_status_label is not None:
+            self.daily_note_status_label.configure(
+                text=f"Saved {self._format_note_updated(saved['updated_at'])}",
+                fg=SUCCESS,
+            )
+        self._refresh_daily_notes_history()
+
+    def save_permanent_note(self) -> None:
+        if self.permanent_note_text is None:
+            return
+        content = self.permanent_note_text.get("1.0", "end-1c")
+        saved = self.app.attendance_store.save_employee_note(
+            self._employee_username(),
+            "permanent",
+            content,
+        )
+        self.permanent_note_text.edit_modified(False)
+        if self.permanent_note_status_label is not None:
+            self.permanent_note_status_label.configure(
+                text=f"Saved {self._format_note_updated(saved['updated_at'])}",
+                fg=SUCCESS,
+            )
+
+    def _save_daily_note_from_shortcut(self) -> str:
+        self.save_daily_note()
+        return "break"
+
+    def _save_permanent_note_from_shortcut(self) -> str:
+        self.save_permanent_note()
+        return "break"
+
+    def _format_note_date(self, value: str) -> str:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").strftime("%d %b %Y")
+        except ValueError:
+            return value
+
+    def _format_note_updated(self, value: str) -> str:
+        if not value:
+            return "-"
+        try:
+            return datetime.fromisoformat(value).strftime("%d %b, %I:%M %p")
+        except ValueError:
+            return value
+
+    def _note_preview(self, content: str) -> str:
+        preview = " ".join(content.split())
+        if len(preview) <= 96:
+            return preview
+        return f"{preview[:93]}..."
+
     def _refresh_service_message_templates(self) -> None:
         self.service_message_templates = self.app.attendance_store.list_service_message_templates(limit=300)
         self._refresh_message_filter_values()
@@ -1310,6 +1582,7 @@ class DashboardPage(tk.Frame):
         self.sales_date_var.set(self._sales_date_display())
         self._refresh_sales_entries_from_store()
         self._refresh_service_message_templates()
+        self._refresh_notes()
         self.user_label.configure(text=f"Signed in as {self.app.display_user}")
         self.welcome_banner.set_text(
             f"Welcome, {self.app.display_user}",

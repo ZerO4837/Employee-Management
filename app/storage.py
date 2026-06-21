@@ -175,6 +175,20 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS employee_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_username TEXT NOT NULL,
+                    note_type TEXT NOT NULL,
+                    note_date TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (employee_username, note_type, note_date)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS service_message_templates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     service_name TEXT NOT NULL,
@@ -259,6 +273,12 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_employee_notes_lookup
+                ON employee_notes (employee_username, note_type, note_date)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_service_message_templates_active
                 ON service_message_templates (is_active, service_name, updated_at)
                 """
@@ -327,6 +347,78 @@ class AttendanceStore:
                 """,
                 (key, value, updated_at),
             )
+
+    def get_employee_note(self, employee_username: str, note_type: str, note_date: str = "") -> dict:
+        note_type = note_type.strip().lower()
+        note_date = note_date if note_type == "daily" else ""
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM employee_notes
+                WHERE employee_username = ?
+                  AND note_type = ?
+                  AND note_date = ?
+                """,
+                (employee_username, note_type, note_date),
+            ).fetchone()
+        note = _row_to_dict(row)
+        if note is not None:
+            return note
+        return {
+            "employee_username": employee_username,
+            "note_type": note_type,
+            "note_date": note_date,
+            "content": "",
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    def save_employee_note(self, employee_username: str, note_type: str, content: str, note_date: str = "") -> dict:
+        note_type = note_type.strip().lower()
+        if note_type not in {"daily", "permanent"}:
+            raise ValueError("Note type must be daily or permanent.")
+        note_date = note_date if note_type == "daily" else ""
+        updated_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO employee_notes
+                (employee_username, note_type, note_date, content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(employee_username, note_type, note_date) DO UPDATE SET
+                    content = excluded.content,
+                    updated_at = excluded.updated_at
+                """,
+                (employee_username, note_type, note_date, content, updated_at, updated_at),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM employee_notes
+                WHERE employee_username = ?
+                  AND note_type = ?
+                  AND note_date = ?
+                """,
+                (employee_username, note_type, note_date),
+            ).fetchone()
+        saved = _row_to_dict(row)
+        if saved is None:
+            raise RuntimeError("Failed to save employee note.")
+        return saved
+
+    def list_employee_daily_notes(self, employee_username: str, limit: int = 30) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM employee_notes
+                WHERE employee_username = ?
+                  AND note_type = 'daily'
+                  AND TRIM(content) <> ''
+                ORDER BY note_date DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (employee_username, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_active_day(self, employee_username: str) -> dict | None:
         with self.connect() as connection:
