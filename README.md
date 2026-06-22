@@ -235,7 +235,7 @@ Employee notifications appear in the header notification control:
 - Announcements stay visible for 3 days, then disappear automatically.
 - The admin send action uses a branded in-app alert instead of a native Windows popup.
 
-For now, announcements are saved locally in SQLite. When Supabase is connected later, this same feature can sync between your PC and the employee PC.
+Announcements are saved locally in SQLite and can also sync through Supabase Cloud Sync, so admin messages sent from one PC can appear on employee PCs.
 
 ## Client Message Templates
 
@@ -252,31 +252,46 @@ Do not split this into two unrelated projects. Keep one codebase and one shared 
 
 For two different PCs to stay linked, the next step will be one shared sync layer, such as a small cloud database/API, a private local-network server, or a controlled shared workbook location. The current SQLite layer gives the app a professional local data foundation, but SQLite by itself is not a live multi-PC sync system.
 
-## Supabase Attendance Sync Later
+## Supabase Scope
 
-We will connect Supabase later only for attendance. Sales can stay local/Excel until you are ready.
+Supabase is currently used for registered employee accounts, the Items Sold list, inventory credentials, admin-controlled announcements, and service message templates. Attendance, notes, sales entries, and Excel sync still use the local app database/OneDrive workflow unless you decide to move those online later.
 
-When it is time, the process will be:
-
-1. Create a free account at `supabase.com`.
-2. Create one project for this business app.
-3. Create attendance tables for shifts and events.
-4. Enable secure rules so the employee app can write attendance but cannot read owner-only reports.
-5. Add the Supabase Project URL and anon public key to the app config.
-6. Keep local SQLite as an offline cache/backup.
-
-Do not put the Supabase `service_role` key inside the desktop app or packaged `.exe`.
+Do not put the Supabase `service_role` key inside the desktop app, public repository, or packaged `.exe`.
 
 ## Future EXE Packaging Notes
 
 The project is ready to package later with a tool such as PyInstaller. The app now separates bundled assets from writable data:
 
 - `assets/` is read-only app content and should be bundled into the `.exe`.
-- `data/` is used only while running from source and is ignored by Git.
-- In a packaged Windows `.exe`, login/reset data will be stored in the employee user's local app data folder instead of beside the installed program.
+- `data/` is used only while running from source and is ignored by Git. Do not include the local `data/` folder in the public release or installer.
+- In a packaged Windows `.exe`, login/reset data, local sales records, notes, cloud settings, and the managed workbook cache are stored in the employee user's local app data folder: `%LOCALAPPDATA%\Digital Service Pakistan\Employee Management`.
+- Updates should replace only application files. Do not delete or overwrite `%LOCALAPPDATA%\Digital Service Pakistan\Employee Management`, otherwise employee records and offline cache will be reset.
+- The built-in zip updater also skips SQLite/database files, `supabase_config.json`, and workbook files if they appear in an update package by mistake.
 
 Example PyInstaller shape for later:
 
 ```powershell
 pyinstaller --noconsole --name "Digital Service Pakistan Employee" --icon "assets/app_icon.ico" --add-data "assets;assets" main.py
 ```
+
+## Supabase Cloud Sync
+
+The app now supports Supabase sync for registered employee accounts, the Items Sold list, inventory credentials, admin announcements, and service message templates, so different PCs can share admin-to-employee updates.
+
+The admin panel includes an Items Sold List tab. Add, rename, or remove services there to control the employee Sold Item Entry dropdown without editing code.
+
+1. Create/open a Supabase project.
+2. Open `supabase_schema.sql` in this repo.
+3. Replace `CHANGE_THIS_ADMIN_SECRET` with a strong private phrase that only the admin PC will know.
+4. Replace `CHANGE_THIS_EMPLOYEE_SYNC_SECRET` with a different private phrase used by installed employee apps to pull account updates.
+5. Run the SQL in Supabase Dashboard > SQL Editor.
+6. In Supabase Dashboard, copy the Project URL and anon public key from the API/Data API settings.
+7. In the app, log in as admin and open Admin > Cloud Sync.
+8. Enable cloud sync, paste the Project URL, anon public key, admin write secret, and employee sync secret, then save.
+9. On employee PCs, use the same Project URL, anon key, and employee sync secret. Do not give employees the admin write secret.
+
+The anon key is only used directly for low-risk read sync such as announcements and service message templates. Employee account sync, Items Sold list sync, and inventory sync go through Supabase RPC functions that also require the employee sync secret, and admin writes go through RPC functions that require the admin write secret. Do not put the Supabase `service_role` key inside the app, the repository, or the packaged installer.
+
+Employee passwords are never synced as plain text. The cloud user sync sends the protected password hash so installed employee apps can verify login locally. Inventory passwords are synced because employees need to view and copy them, so keep the employee sync secret private and only include it in trusted installed copies.
+
+The app still keeps SQLite as an offline cache. If Supabase is unavailable, employees can keep using local app data and the cloud sync will retry in the background when the app is open.

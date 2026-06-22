@@ -42,7 +42,16 @@ APP_ICON_PATH = ASSET_DIR / "app_icon.ico"
 DATA_DIR = _app_data_root() if getattr(sys, "frozen", False) else BASE_DIR / "data"
 AUTH_CONFIG_PATH = DATA_DIR / "auth_config.json"
 APP_DB_PATH = DATA_DIR / "employee_management.sqlite3"
+SUPABASE_CONFIG_PATH = DATA_DIR / "supabase_config.json"
 MANAGED_SALES_WORKBOOK_PATH = DATA_DIR / "sales_workbook.xlsx"
+SUPABASE_URL = os.environ.get("DSP_SUPABASE_URL", "").strip()
+SUPABASE_ANON_KEY = os.environ.get("DSP_SUPABASE_ANON_KEY", "").strip()
+SUPABASE_ADMIN_SECRET = os.environ.get("DSP_SUPABASE_ADMIN_SECRET", "").strip()
+SUPABASE_EMPLOYEE_SYNC_SECRET = os.environ.get("DSP_SUPABASE_EMPLOYEE_SYNC_SECRET", "").strip()
+try:
+    SUPABASE_SYNC_INTERVAL_SECONDS = int(os.environ.get("DSP_SUPABASE_SYNC_INTERVAL_SECONDS", "15"))
+except ValueError:
+    SUPABASE_SYNC_INTERVAL_SECONDS = 15
 _sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH") or str(DATA_DIR / "sales_entries.xlsx")
 SALES_WORKBOOK_PATH = Path(os.path.expandvars(_sales_workbook_setting)).expanduser()
 SALES_WORKSHEET_NAME = os.environ.get("DSP_SALES_WORKSHEET_NAME", "").strip()

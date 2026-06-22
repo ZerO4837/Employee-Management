@@ -20,7 +20,6 @@ from app.config import (
     NAVY,
     NAVY_LIGHT,
     SALES_FIELDS,
-    SALES_SERVICE_NAMES,
     SIDEBAR_ACTIVE,
     SIDEBAR_ACTIVE_TEXT,
     SIDEBAR_BG,
@@ -72,7 +71,7 @@ def _amount_value_valid(value: str) -> bool:
 
 
 class DashboardPage(tk.Frame):
-    SHIFT_LOCKED_VIEWS = {"sales", "today"}
+    SHIFT_LOCKED_VIEWS = {"inventory", "sales", "today"}
     SALES_VISIBLE_DAYS = 5
 
     def __init__(self, parent: tk.Misc, app) -> None:
@@ -83,6 +82,7 @@ class DashboardPage(tk.Frame):
         self.views: dict[str, tk.Frame] = {}
         self.sales_vars: dict[str, tk.StringVar] = {}
         self.sales_date_var = tk.StringVar()
+        self.sales_item_combo: ttk.Combobox | None = None
         self.item_other_var = tk.StringVar()
         self.status_other_var = tk.StringVar()
         self.message_filter_var = tk.StringVar(value="All Services")
@@ -95,6 +95,16 @@ class DashboardPage(tk.Frame):
         self.message_detail_meta_label: tk.Label | None = None
         self.message_count_label: tk.Label | None = None
         self.message_copy_status_label: tk.Label | None = None
+        self.inventory_filter_var = tk.StringVar(value="All Services")
+        self.inventory_items: list[dict] = []
+        self.selected_inventory_id: int | None = None
+        self.inventory_filter_combo: ttk.Combobox | None = None
+        self.inventory_tree: ttk.Treeview | None = None
+        self.inventory_preview_text: tk.Text | None = None
+        self.inventory_detail_title_label: tk.Label | None = None
+        self.inventory_detail_meta_label: tk.Label | None = None
+        self.inventory_count_label: tk.Label | None = None
+        self.inventory_copy_status_label: tk.Label | None = None
         self.notes_selected_date = self._sales_date()
         self.daily_note_text: tk.Text | None = None
         self.permanent_note_text: tk.Text | None = None
@@ -214,6 +224,7 @@ class DashboardPage(tk.Frame):
             ("attendance", "Attendance"),
             ("notes", "Notes"),
             ("messages", "Client Messages"),
+            ("inventory", "Inventory"),
             ("sales", "Sold Item Entry"),
             ("today", "5-Day Data"),
         ]
@@ -221,7 +232,7 @@ class DashboardPage(tk.Frame):
             button = make_button(nav_container, label, lambda view=key: self.show_view(view), "sidebar", anchor="w")
             button.grid(row=index, column=0, sticky="ew", pady=4)
             self.nav_buttons[key] = button
-            if key in {"sales", "today"}:
+            if key in self.SHIFT_LOCKED_VIEWS:
                 self.shift_required_buttons.append(button)
 
         tk.Frame(sidebar, bg=SIDEBAR_BG).pack(fill="both", expand=True)
@@ -292,6 +303,7 @@ class DashboardPage(tk.Frame):
         self.views["attendance"] = self._build_attendance_view()
         self.views["notes"] = self._build_notes_view()
         self.views["messages"] = self._build_messages_view()
+        self.views["inventory"] = self._build_inventory_view()
         self.views["sales"] = self._build_sales_view()
         self.views["today"] = self._build_today_view()
         self.show_view("overview")
@@ -630,7 +642,7 @@ class DashboardPage(tk.Frame):
         )
         self.message_filter_combo = ttk.Combobox(
             filter_row,
-            values=["All Services", *SALES_SERVICE_NAMES],
+            values=["All Services", *self._sales_item_values()],
             textvariable=self.message_filter_var,
             state="readonly",
             font=(FONT, 10),
@@ -707,6 +719,131 @@ class DashboardPage(tk.Frame):
         self.message_copy_status_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
         return view
 
+    def _build_inventory_view(self) -> tk.Frame:
+        view = tk.Frame(self.content, bg=BG)
+        view.grid_columnconfigure(0, weight=1)
+        view.grid_rowconfigure(1, weight=1)
+
+        banner = GradientBanner(
+            view,
+            "Inventory",
+            "View approved service account details and copy the exact credentials when needed.",
+            height=118,
+            start=NAVY,
+            end=BLUE,
+        )
+        banner.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+
+        workspace = tk.Frame(view, bg=BG)
+        workspace.grid(row=1, column=0, sticky="nsew")
+        workspace.grid_columnconfigure(0, weight=2)
+        workspace.grid_columnconfigure(1, weight=3)
+        workspace.grid_rowconfigure(0, weight=1)
+
+        list_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=BLUE, accent_end=TEAL)
+        list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        list_body = list_card.body
+        list_body.grid_columnconfigure(0, weight=1)
+        list_body.grid_rowconfigure(3, weight=1)
+
+        tk.Label(list_body, text="Inventory Library", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        self.inventory_count_label = tk.Label(list_body, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.inventory_count_label.grid(row=1, column=0, sticky="w", pady=(0, 14))
+
+        filter_row = tk.Frame(list_body, bg=WHITE)
+        filter_row.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        filter_row.grid_columnconfigure(1, weight=1)
+        tk.Label(filter_row, text="Service", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
+        )
+        self.inventory_filter_combo = ttk.Combobox(
+            filter_row,
+            values=["All Services", *self._sales_item_values()],
+            textvariable=self.inventory_filter_var,
+            state="readonly",
+            font=(FONT, 10),
+        )
+        self.inventory_filter_combo.grid(row=0, column=1, sticky="ew", ipady=5)
+        self.inventory_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_inventory_list())
+        make_button(filter_row, "Refresh", self._refresh_inventory_items, "light").grid(
+            row=0, column=2, sticky="e", padx=(10, 0)
+        )
+
+        self.inventory_tree = ttk.Treeview(
+            list_body,
+            columns=("service", "email", "updated"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.inventory_tree.heading("service", text="Service", anchor="w")
+        self.inventory_tree.heading("email", text="Email / Account", anchor="w")
+        self.inventory_tree.heading("updated", text="Updated", anchor="w")
+        self.inventory_tree.column("service", width=220, minwidth=160, anchor="w", stretch=True)
+        self.inventory_tree.column("email", width=240, minwidth=170, anchor="w", stretch=True)
+        self.inventory_tree.column("updated", width=120, minwidth=110, anchor="w", stretch=False)
+        self.inventory_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
+        self.inventory_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        self.inventory_tree.grid(row=3, column=0, sticky="nsew")
+        self.inventory_tree.bind("<<TreeviewSelect>>", self._on_inventory_selected)
+
+        list_scroll = ttk.Scrollbar(list_body, orient="vertical", command=self.inventory_tree.yview)
+        list_scroll.grid(row=3, column=1, sticky="ns")
+        self.inventory_tree.configure(yscrollcommand=list_scroll.set)
+
+        preview_card = SurfaceCard(workspace, padx=22, pady=20, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        preview_card.grid(row=0, column=1, sticky="nsew")
+        preview = preview_card.body
+        preview.grid_columnconfigure(0, weight=1)
+        preview.grid_rowconfigure(2, weight=1)
+
+        self.inventory_detail_title_label = tk.Label(
+            preview,
+            text="Select inventory",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+            justify="left",
+            wraplength=520,
+        )
+        self.inventory_detail_title_label.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.inventory_detail_meta_label = tk.Label(preview, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.inventory_detail_meta_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 14))
+
+        self.inventory_preview_text = tk.Text(
+            preview,
+            bg="#fbfdff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            font=(FONT, 11),
+            wrap="word",
+            padx=12,
+            pady=12,
+        )
+        self.inventory_preview_text.grid(row=2, column=0, sticky="nsew")
+        self.inventory_preview_text.configure(state="disabled")
+        preview_scroll = ttk.Scrollbar(preview, orient="vertical", command=self.inventory_preview_text.yview)
+        preview_scroll.grid(row=2, column=1, sticky="ns")
+        self.inventory_preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        actions = tk.Frame(preview, bg=WHITE)
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        actions.grid_columnconfigure(3, weight=1)
+        make_button(actions, "Copy Email", self.copy_selected_inventory_email, "primary").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        make_button(actions, "Copy Password", self.copy_selected_inventory_password, "success").grid(
+            row=0, column=1, sticky="w", padx=(0, 8)
+        )
+        make_button(actions, "Copy Details", self.copy_selected_inventory_details, "light").grid(
+            row=0, column=2, sticky="w"
+        )
+        self.inventory_copy_status_label = tk.Label(actions, text="", bg=WHITE, fg=SUCCESS, font=(FONT_BOLD, 10))
+        self.inventory_copy_status_label.grid(row=0, column=3, sticky="w", padx=(12, 0))
+        return view
     def _build_sales_view(self) -> tk.Frame:
         view = tk.Frame(self.content, bg=BG)
         view.grid_columnconfigure(0, weight=2)
@@ -954,6 +1091,8 @@ class DashboardPage(tk.Frame):
         kind: str,
         values: list[str] | None,
     ) -> None:
+        if key == "item":
+            values = self._sales_item_values()
         variable = tk.StringVar()
         if key == "buying_amount":
             variable.set("0")
@@ -966,6 +1105,7 @@ class DashboardPage(tk.Frame):
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
             if key == "item":
+                self.sales_item_combo = widget
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_item_other_visibility())
             if key == "status":
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
@@ -1290,6 +1430,21 @@ class DashboardPage(tk.Frame):
             return preview
         return f"{preview[:93]}..."
 
+    def _sales_item_values(self) -> list[str]:
+        return self.app.attendance_store.list_service_names(include_other=True)
+
+    def _refresh_service_catalog_values(self) -> None:
+        values = self._sales_item_values()
+        if self.sales_item_combo is not None:
+            self.sales_item_combo.configure(values=values)
+            current = self.sales_vars.get("item").get() if self.sales_vars.get("item") is not None else ""
+            if current and current not in values and current != "Other":
+                self.item_other_var.set(current)
+                self.sales_vars["item"].set("Other")
+            elif not current and values:
+                self.sales_vars["item"].set(values[0])
+            self._update_item_other_visibility()
+
     def _refresh_service_message_templates(self) -> None:
         self.service_message_templates = self.app.attendance_store.list_service_message_templates(limit=300)
         self._refresh_message_filter_values()
@@ -1414,6 +1569,178 @@ class DashboardPage(tk.Frame):
         if self.message_copy_status_label is not None:
             self.message_copy_status_label.configure(text="Copied to clipboard")
 
+    def _refresh_inventory_items(self) -> None:
+        if not self.checked_in:
+            self.inventory_items = []
+            self.selected_inventory_id = None
+            self._refresh_inventory_filter_values()
+            self._refresh_inventory_list()
+            return
+        self.inventory_items = self.app.attendance_store.list_inventory_items(limit=1000)
+        self._refresh_inventory_filter_values()
+        self._refresh_inventory_list()
+
+    def _refresh_inventory_filter_values(self) -> None:
+        if self.inventory_filter_combo is None:
+            return
+        services = sorted(
+            {item["service_name"] for item in self.inventory_items if item["service_name"]},
+            key=str.lower,
+        )
+        values = ["All Services", *services]
+        if self.inventory_filter_var.get() not in values:
+            self.inventory_filter_var.set("All Services")
+        self.inventory_filter_combo.configure(values=values)
+
+    def _filtered_inventory_items(self) -> list[dict]:
+        selected_service = self.inventory_filter_var.get()
+        if not selected_service or selected_service == "All Services":
+            return list(self.inventory_items)
+        return [item for item in self.inventory_items if item["service_name"] == selected_service]
+
+    def _refresh_inventory_list(self) -> None:
+        if self.inventory_tree is None:
+            return
+        for item in self.inventory_tree.get_children():
+            self.inventory_tree.delete(item)
+        if not self.checked_in:
+            self.selected_inventory_id = None
+            if self.inventory_count_label is not None:
+                self.inventory_count_label.configure(text="Check in to view inventory.")
+            self._set_inventory_preview(None)
+            return
+        items = self._filtered_inventory_items()
+        if self.inventory_count_label is not None:
+            total = len(self.inventory_items)
+            visible = len(items)
+            total_label = "inventory item" if total == 1 else "inventory items"
+            visible_label = "inventory item" if visible == 1 else "inventory items"
+            if total == visible:
+                self.inventory_count_label.configure(text=f"{visible} active {visible_label} available")
+            else:
+                self.inventory_count_label.configure(text=f"{visible} of {total} {total_label} shown")
+
+        valid_ids: set[int] = set()
+        first_id: int | None = None
+        for index, item in enumerate(items):
+            item_id = int(item["id"])
+            valid_ids.add(item_id)
+            if first_id is None:
+                first_id = item_id
+            tag = "inventory_even" if index % 2 == 0 else "inventory_odd"
+            self.inventory_tree.insert(
+                "",
+                "end",
+                iid=str(item_id),
+                tags=(tag,),
+                values=(
+                    item["service_name"],
+                    item["account_email"],
+                    self._format_template_time(item["updated_at"]),
+                ),
+            )
+
+        if self.selected_inventory_id in valid_ids:
+            selected = self.selected_inventory_id
+        else:
+            selected = first_id
+            self.selected_inventory_id = selected
+
+        if selected is not None:
+            self.inventory_tree.selection_set(str(selected))
+            self.inventory_tree.focus(str(selected))
+            self._set_inventory_preview(self._inventory_item_by_id(selected))
+            return
+        self._set_inventory_preview(None)
+
+    def _on_inventory_selected(self, _event: tk.Event) -> None:
+        if self.inventory_tree is None:
+            return
+        selection = self.inventory_tree.selection()
+        self.selected_inventory_id = int(selection[0]) if selection else None
+        self._set_inventory_preview(self._inventory_item_by_id(self.selected_inventory_id))
+
+    def _inventory_item_by_id(self, item_id: int | None) -> dict | None:
+        if item_id is None:
+            return None
+        for item in self.inventory_items:
+            if int(item["id"]) == item_id:
+                return item
+        return None
+
+    def _inventory_detail_text(self, item: dict) -> str:
+        parts = [
+            f"Service: {item.get('service_name', '')}",
+            f"Email: {item.get('account_email', '')}",
+            f"Password: {item.get('account_password', '')}",
+        ]
+        comment = str(item.get("comment", "")).strip()
+        if comment:
+            parts.extend(["", "Comment:", comment])
+        return "\n".join(parts)
+
+    def _set_inventory_preview(self, item: dict | None) -> None:
+        if (
+            self.inventory_preview_text is None
+            or self.inventory_detail_title_label is None
+            or self.inventory_detail_meta_label is None
+        ):
+            return
+        self.inventory_preview_text.configure(state="normal")
+        self.inventory_preview_text.delete("1.0", tk.END)
+        if not self.checked_in:
+            self.inventory_detail_title_label.configure(text="Check in required")
+            self.inventory_detail_meta_label.configure(text="Inventory credentials unlock after you check in.")
+            self.inventory_preview_text.insert("1.0", "Start day and check in to view or copy inventory credentials.")
+        elif item is None:
+            self.inventory_detail_title_label.configure(text="No inventory selected")
+            if self.inventory_items:
+                self.inventory_detail_meta_label.configure(text="Choose an inventory item from the library.")
+            else:
+                self.inventory_detail_meta_label.configure(text="No inventory has been published yet.")
+            self.inventory_preview_text.insert("1.0", "Published inventory credentials will appear here.")
+        else:
+            self.inventory_detail_title_label.configure(text=item["service_name"])
+            self.inventory_detail_meta_label.configure(
+                text=f"Updated {self._format_template_time(item['updated_at'])}"
+            )
+            self.inventory_preview_text.insert("1.0", self._inventory_detail_text(item))
+        self.inventory_preview_text.configure(state="disabled")
+        if self.inventory_copy_status_label is not None:
+            self.inventory_copy_status_label.configure(text="")
+
+    def _copy_inventory_value(self, value: str, label: str) -> None:
+        if not self._require_shift_active():
+            return
+        if not value:
+            messagebox.showinfo("Nothing to copy", f"This inventory item does not have a {label.lower()}.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update()
+        if self.inventory_copy_status_label is not None:
+            self.inventory_copy_status_label.configure(text=f"Copied {label.lower()}")
+
+    def copy_selected_inventory_email(self) -> None:
+        item = self._inventory_item_by_id(self.selected_inventory_id)
+        if item is None:
+            messagebox.showinfo("No inventory selected", "Select an inventory item first.")
+            return
+        self._copy_inventory_value(str(item.get("account_email", "")), "Email")
+
+    def copy_selected_inventory_password(self) -> None:
+        item = self._inventory_item_by_id(self.selected_inventory_id)
+        if item is None:
+            messagebox.showinfo("No inventory selected", "Select an inventory item first.")
+            return
+        self._copy_inventory_value(str(item.get("account_password", "")), "Password")
+
+    def copy_selected_inventory_details(self) -> None:
+        item = self._inventory_item_by_id(self.selected_inventory_id)
+        if item is None:
+            messagebox.showinfo("No inventory selected", "Select an inventory item first.")
+            return
+        self._copy_inventory_value(self._inventory_detail_text(item), "Details")
     def _refresh_sales_day_cards(self) -> None:
         visible_dates = self._sales_visible_dates()
         for index, slot in enumerate(self.sales_day_card_slots):
@@ -1549,12 +1876,12 @@ class DashboardPage(tk.Frame):
             )
             return
         if shift_active:
-            self.access_notice.configure(text="Sales, breaks, and 5-day data controls are unlocked.", fg=SUCCESS)
+            self.access_notice.configure(text="Inventory, sales, breaks, and 5-day data controls are unlocked.", fg=SUCCESS)
         elif self.day_active:
-            self.access_notice.configure(text="Day is started. Check in to unlock work controls.", fg=BLUE)
+            self.access_notice.configure(text="Day is started. Check in to unlock inventory and work controls.", fg=BLUE)
         else:
             self.access_notice.configure(
-                text="Start day first, then check in to unlock sales and break controls.",
+                text="Start day first, then check in to unlock inventory, sales, and break controls.",
                 fg=WARNING,
             )
 
@@ -1583,7 +1910,9 @@ class DashboardPage(tk.Frame):
         self._sync_attendance_state()
         self.sales_date_var.set(self._sales_date_display())
         self._refresh_sales_entries_from_store()
+        self._refresh_service_catalog_values()
         self._refresh_service_message_templates()
+        self._refresh_inventory_items()
         self._refresh_notes()
         self.user_label.configure(text=f"Signed in as {self.app.display_user}")
         self.welcome_banner.set_text(
@@ -2293,6 +2622,8 @@ class EditEntryWindow(tk.Toplevel):
         values: list[str] | None,
     ) -> None:
         value = self.entry.get(key, "")
+        if key == "item":
+            values = self.dashboard._sales_item_values()
         if key == "item" and values and value not in values:
             variable = tk.StringVar(value="Other")
             self.item_other_var.set(value)
@@ -2308,6 +2639,7 @@ class EditEntryWindow(tk.Toplevel):
             widget = combo_box(parent, variable, values)
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
             if key == "item":
+                self.sales_item_combo = widget
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_item_other_visibility())
             if key == "status":
                 widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())

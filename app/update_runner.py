@@ -19,8 +19,24 @@ EXCLUDED_UPDATE_NAMES = {
     ".env",
     "auth_config.json",
     "bootstrap_credentials.txt",
+    "employee_management.sqlite3",
+    "employee_management.sqlite3-shm",
+    "employee_management.sqlite3-wal",
+    "sales_entries.xlsx",
+    "sales_entries.xlsm",
+    "sales_workbook.xlsx",
+    "supabase_config.json",
     "update_error.log",
 }
+
+PRESERVED_UPDATE_SUFFIXES = (
+    ".sqlite3",
+    ".sqlite3-shm",
+    ".sqlite3-wal",
+    ".db",
+    ".db-shm",
+    ".db-wal",
+)
 
 
 def _startupinfo():
@@ -79,6 +95,7 @@ def _zip_payload_root(extract_dir: Path) -> Path:
 def _ignore_update_names(_directory: str, names: list[str]) -> set[str]:
     ignored = {name for name in names if name in EXCLUDED_UPDATE_NAMES}
     ignored.update(name for name in names if name.endswith(".pyc"))
+    ignored.update(name for name in names if name.lower().endswith(PRESERVED_UPDATE_SUFFIXES))
     return ignored
 
 

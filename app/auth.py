@@ -52,6 +52,14 @@ def _user_key(username: str) -> str:
     return username.strip().lower()
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class AuthStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -134,10 +142,14 @@ class AuthStore:
         normalized["username"] = username
         normalized["display_name"] = str(user.get("display_name") or username).strip() or username
         normalized["role"] = str(user.get("role") or "employee").strip().lower()
-        normalized["is_active"] = bool(user.get("is_active", True))
+        normalized["is_active"] = _as_bool(user.get("is_active", True), True)
+        normalized["is_deleted"] = _as_bool(user.get("is_deleted", False), False)
         normalized["password_hash"] = str(user.get("password_hash", ""))
         normalized["created_at"] = str(user.get("created_at", ""))
         normalized["updated_at"] = str(user.get("updated_at", ""))
+        normalized["deleted_at"] = str(user.get("deleted_at", ""))
+        normalized["cloud_synced_at"] = str(user.get("cloud_synced_at", ""))
+        normalized["cloud_sync_error"] = str(user.get("cloud_sync_error", ""))
         return normalized
 
     def _load(self) -> dict:
@@ -198,11 +210,11 @@ class AuthStore:
 
     def is_user_inactive(self, username: str) -> bool:
         user = self.data["users"].get(_user_key(username))
-        return user is not None and not bool(user.get("is_active", True))
+        return user is not None and not bool(user.get("is_deleted", False)) and not bool(user.get("is_active", True))
 
     def verify(self, username: str, password: str) -> dict[str, str] | None:
         user = self.data["users"].get(_user_key(username))
-        if not user:
+        if not user or user.get("is_deleted", False):
             return None
         if not user.get("is_active", True):
             return None
@@ -227,12 +239,16 @@ class AuthStore:
         employee = self.data["users"][DEFAULT_USERNAME.lower()]
         employee["password_hash"] = hash_password(new_password)
         employee["updated_at"] = _now()
+        employee["cloud_synced_at"] = ""
+        employee["cloud_sync_error"] = ""
         self.save()
         return True, "Employee password reset successfully."
 
     def list_users(self, include_admin: bool = False) -> list[dict]:
         users = []
         for user in self.data.get("users", {}).values():
+            if user.get("is_deleted", False):
+                continue
             if not include_admin and user.get("role") == "admin":
                 continue
             item = {
@@ -249,7 +265,7 @@ class AuthStore:
 
     def get_user(self, username: str) -> dict | None:
         user = self.data.get("users", {}).get(_user_key(username))
-        if user is None:
+        if user is None or user.get("is_deleted", False):
             return None
         return {
             "username": user.get("username", ""),
@@ -272,7 +288,8 @@ class AuthStore:
         role = role.strip().lower() or "employee"
         if not username:
             return False, "Username is required.", ""
-        if _user_key(username) in self.data["users"]:
+        existing_user = self.data["users"].get(_user_key(username))
+        if existing_user is not None and not existing_user.get("is_deleted", False):
             return False, "Username already exists.", ""
         if role not in {"employee", "admin"}:
             return False, "Role must be employee or admin.", ""
@@ -288,6 +305,10 @@ class AuthStore:
             "password_hash": hash_password(password),
             "created_at": now,
             "updated_at": now,
+            "deleted_at": "",
+            "is_deleted": False,
+            "cloud_synced_at": "",
+            "cloud_sync_error": "",
         }
         self.save()
         return True, "User created.", password
@@ -308,15 +329,35 @@ class AuthStore:
         new_key = _user_key(username)
         if not new_key:
             return False, "Username is required."
-        if new_key != original_key and new_key in self.data["users"]:
+        existing_new_user = self.data["users"].get(new_key)
+        if new_key != original_key and existing_new_user is not None and not existing_new_user.get("is_deleted", False):
             return False, "Username already exists."
+        now = _now()
+        old_username = user.get("username", original_username)
+        old_display_name = user.get("display_name", old_username)
         user["username"] = username.strip()
         user["display_name"] = display_name.strip() or username.strip()
         user["is_active"] = bool(is_active)
-        user["updated_at"] = _now()
+        user["is_deleted"] = False
+        user["deleted_at"] = ""
+        user["updated_at"] = now
+        user["cloud_synced_at"] = ""
+        user["cloud_sync_error"] = ""
         if new_key != original_key:
             self.data["users"][new_key] = user
-            del self.data["users"][original_key]
+            self.data["users"][original_key] = {
+                "username": old_username,
+                "display_name": old_display_name,
+                "role": "employee",
+                "is_active": False,
+                "is_deleted": True,
+                "password_hash": "",
+                "created_at": user.get("created_at", now),
+                "updated_at": now,
+                "deleted_at": now,
+                "cloud_synced_at": "",
+                "cloud_sync_error": "",
+            }
         self.save()
         return True, "User updated."
 
@@ -328,6 +369,8 @@ class AuthStore:
             return False, "Admin account cannot be frozen here."
         user["is_active"] = bool(is_active)
         user["updated_at"] = _now()
+        user["cloud_synced_at"] = ""
+        user["cloud_sync_error"] = ""
         self.save()
         return True, "User status updated."
 
@@ -342,6 +385,8 @@ class AuthStore:
             return False, "Password must be at least 8 characters.", ""
         user["password_hash"] = hash_password(password)
         user["updated_at"] = _now()
+        user["cloud_synced_at"] = ""
+        user["cloud_sync_error"] = ""
         self.save()
         return True, "Password reset.", password
 
@@ -352,6 +397,95 @@ class AuthStore:
             return False, "User could not be found."
         if user.get("role") == "admin":
             return False, "Admin account cannot be removed here."
-        del self.data["users"][key]
+        now = _now()
+        user["is_active"] = False
+        user["is_deleted"] = True
+        user["password_hash"] = ""
+        user["deleted_at"] = now
+        user["updated_at"] = now
+        user["cloud_synced_at"] = ""
+        user["cloud_sync_error"] = ""
         self.save()
         return True, "User removed."
+
+    def list_cloud_pending_users(self, limit: int = 100) -> list[dict]:
+        users: list[dict] = []
+        for key, user in self.data.get("users", {}).items():
+            if user.get("role") == "admin":
+                continue
+            updated_at = str(user.get("updated_at", ""))
+            cloud_synced_at = str(user.get("cloud_synced_at", ""))
+            if cloud_synced_at and cloud_synced_at >= updated_at and not user.get("cloud_sync_error"):
+                continue
+            item = dict(user)
+            item["username_key"] = key
+            users.append(item)
+            if len(users) >= limit:
+                break
+        users.sort(key=lambda item: (str(item.get("updated_at", "")), str(item.get("username_key", ""))))
+        return users
+
+    def mark_user_cloud_sync(self, username: str) -> None:
+        key = _user_key(username)
+        user = self.data.get("users", {}).get(key)
+        if user is None:
+            return
+        user["cloud_synced_at"] = _now()
+        user["cloud_sync_error"] = ""
+        self.save()
+
+    def mark_user_cloud_error(self, username: str, error: str) -> None:
+        key = _user_key(username)
+        user = self.data.get("users", {}).get(key)
+        if user is None:
+            return
+        user["cloud_sync_error"] = error[:500]
+        self.save()
+
+    def import_cloud_user(self, item: dict) -> bool:
+        username = str(item.get("username", "")).strip()
+        key = str(item.get("username_key") or _user_key(username)).strip().lower()
+        if not key:
+            return False
+        existing = self.data.get("users", {}).get(key)
+        updated_at = str(item.get("updated_at") or _now())
+        if existing is not None:
+            local_updated = str(existing.get("updated_at", ""))
+            if local_updated >= updated_at and not existing.get("cloud_sync_error"):
+                return False
+        is_deleted = _as_bool(item.get("is_deleted", False), False)
+        now = _now()
+        if is_deleted:
+            synced_user = {
+                "username": username or (existing or {}).get("username", key),
+                "display_name": str(item.get("display_name") or (existing or {}).get("display_name") or username or key),
+                "role": "employee",
+                "is_active": False,
+                "is_deleted": True,
+                "password_hash": "",
+                "created_at": str(item.get("created_at") or (existing or {}).get("created_at") or updated_at),
+                "updated_at": updated_at,
+                "deleted_at": str(item.get("deleted_at") or updated_at),
+                "cloud_synced_at": now,
+                "cloud_sync_error": "",
+            }
+        else:
+            password_hash = str(item.get("password_hash") or (existing or {}).get("password_hash", ""))
+            if not username or not password_hash:
+                return False
+            synced_user = {
+                "username": username,
+                "display_name": str(item.get("display_name") or username),
+                "role": "employee",
+                "is_active": _as_bool(item.get("is_active", True), True),
+                "is_deleted": False,
+                "password_hash": password_hash,
+                "created_at": str(item.get("created_at") or (existing or {}).get("created_at") or updated_at),
+                "updated_at": updated_at,
+                "deleted_at": "",
+                "cloud_synced_at": now,
+                "cloud_sync_error": "",
+            }
+        self.data["users"][key] = synced_user
+        self.save()
+        return True

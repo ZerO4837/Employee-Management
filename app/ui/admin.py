@@ -10,6 +10,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from app.cloud_sync import SupabaseConfig
 from app.config import (
     BG,
     BLUE,
@@ -21,7 +22,6 @@ from app.config import (
     MANAGED_SALES_WORKBOOK_PATH,
     MUTED,
     NAVY,
-    SALES_SERVICE_NAMES,
     SUCCESS,
     TEAL,
     TEXT,
@@ -61,6 +61,34 @@ class AdminPage(tk.Frame):
         self.template_form_title_label: tk.Label | None = None
         self.template_form_status_label: tk.Label | None = None
         self.template_save_button: tk.Button | None = None
+        self.template_service_combo: ttk.Combobox | None = None
+        self.service_catalog_name_var = tk.StringVar()
+        self.admin_service_catalog_items: list[dict] = []
+        self.selected_service_catalog_id: int | None = None
+        self.editing_service_catalog_id: int | None = None
+        self.service_catalog_tree: ttk.Treeview | None = None
+        self.service_catalog_form_title_label: tk.Label | None = None
+        self.service_catalog_form_status_label: tk.Label | None = None
+        self.service_catalog_save_button: tk.Button | None = None
+        self.inventory_service_var = tk.StringVar(value="")
+        self.inventory_email_var = tk.StringVar()
+        self.inventory_password_var = tk.StringVar()
+        self.admin_inventory_items: list[dict] = []
+        self.selected_inventory_id: int | None = None
+        self.editing_inventory_id: int | None = None
+        self.inventory_form_title_label: tk.Label | None = None
+        self.inventory_form_status_label: tk.Label | None = None
+        self.inventory_save_button: tk.Button | None = None
+        self.inventory_comment_text: tk.Text | None = None
+        self.inventory_tree: ttk.Treeview | None = None
+        self.inventory_preview_text: tk.Text | None = None
+        self.inventory_service_combo: ttk.Combobox | None = None
+        self.supabase_enabled_var = tk.BooleanVar(value=False)
+        self.supabase_url_var = tk.StringVar()
+        self.supabase_anon_key_var = tk.StringVar()
+        self.supabase_admin_secret_var = tk.StringVar()
+        self.supabase_employee_sync_secret_var = tk.StringVar()
+        self.cloud_sync_status_label: tk.Label | None = None
         self.excel_path_var = tk.StringVar()
         self.excel_sheet_var = tk.StringVar()
         self.sales_period_var = tk.StringVar(value="Last 5 Days")
@@ -88,6 +116,9 @@ class AdminPage(tk.Frame):
         attendance_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         announcements_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         messages_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        inventory_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        service_catalog_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        cloud_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         sales_data_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         workbook_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         self.notebook.add(dashboard_tab, text="Dashboard")
@@ -95,6 +126,9 @@ class AdminPage(tk.Frame):
         self.notebook.add(attendance_tab, text="Attendance")
         self.notebook.add(announcements_tab, text="Announcements")
         self.notebook.add(messages_tab, text="Service Messages")
+        self.notebook.add(inventory_tab, text="Inventory")
+        self.notebook.add(service_catalog_tab, text="Items Sold List")
+        self.notebook.add(cloud_tab, text="Cloud Sync")
         self.notebook.add(sales_data_tab, text="Sales Data")
         self.notebook.add(workbook_tab, text="Sales Workbook")
 
@@ -103,6 +137,9 @@ class AdminPage(tk.Frame):
         self._build_attendance_tab(attendance_tab)
         self._build_announcements_tab(announcements_tab)
         self._build_message_templates_tab(messages_tab)
+        self._build_inventory_tab(inventory_tab)
+        self._build_service_catalog_tab(service_catalog_tab)
+        self._build_cloud_sync_tab(cloud_tab)
         self._build_sales_data_tab(sales_data_tab)
         self._build_sales_workbook_tab(workbook_tab)
 
@@ -557,6 +594,31 @@ class AdminPage(tk.Frame):
         ann_scroll.grid(row=1, column=1, sticky="ns")
         self.announcements_tree.configure(yscrollcommand=ann_scroll.set)
 
+    def _active_service_names(self, include_other: bool = True) -> list[str]:
+        return self.app.attendance_store.list_service_names(include_other=include_other)
+
+    def _template_service_values(self) -> list[str]:
+        values = ["General", *self._active_service_names(include_other=True)]
+        if "Other" not in values:
+            values.append("Other")
+        return values
+
+    def _inventory_service_values(self) -> list[str]:
+        return self._active_service_names(include_other=False)
+
+    def _refresh_service_dropdown_values(self) -> None:
+        template_values = self._template_service_values()
+        if self.template_service_combo is not None:
+            self.template_service_combo.configure(values=template_values)
+            if self.template_service_var.get() not in template_values:
+                fallback = "Other"
+                if len(template_values) > 1:
+                    fallback = template_values[1]
+                self.template_service_var.set(fallback)
+                self.template_other_service_var.set("")
+                self._update_template_other_service_visibility()
+        if self.inventory_service_combo is not None:
+            self.inventory_service_combo.configure(values=self._inventory_service_values())
     def _build_message_templates_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=3)
         parent.grid_columnconfigure(1, weight=2)
@@ -586,15 +648,15 @@ class AdminPage(tk.Frame):
         self.template_form_status_label.grid(row=1, column=0, sticky="w", pady=(0, 16))
 
         tk.Label(compose, text="Service", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=2, column=0, sticky="w")
-        service_combo = ttk.Combobox(
+        self.template_service_combo = ttk.Combobox(
             compose,
-            values=["General", *SALES_SERVICE_NAMES],
+            values=self._template_service_values(),
             textvariable=self.template_service_var,
             state="readonly",
             font=(FONT, 10),
         )
-        service_combo.grid(row=3, column=0, sticky="ew", ipady=6, pady=(8, 14))
-        service_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_template_other_service_visibility())
+        self.template_service_combo.grid(row=3, column=0, sticky="ew", ipady=6, pady=(8, 14))
+        self.template_service_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_template_other_service_visibility())
 
         self._template_other_service_field(compose, 4, 0)
 
@@ -732,6 +794,340 @@ class AdminPage(tk.Frame):
                 )
         if self.template_save_button is not None:
             self.template_save_button.configure(text="Save Changes" if editing else "Save Service Message")
+
+    def _build_inventory_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=2)
+        parent.grid_columnconfigure(1, weight=3)
+        parent.grid_rowconfigure(0, weight=1)
+
+        form_card = SurfaceCard(parent, padx=22, pady=20, accent=True, accent_start=BLUE, accent_end=TEAL)
+        form_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        form = form_card.body
+        form.grid_columnconfigure(0, weight=1)
+        self.inventory_form_title_label = tk.Label(
+            form,
+            text="Add Inventory Item",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+        )
+        self.inventory_form_title_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.inventory_form_status_label = tk.Label(
+            form,
+            text="Add service credentials employees can view and copy from their Inventory panel.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=430,
+            justify="left",
+        )
+        self.inventory_form_status_label.grid(row=1, column=0, sticky="w", pady=(0, 16))
+
+        tk.Label(form, text="Service Name", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=2, column=0, sticky="w")
+        self.inventory_service_combo = ttk.Combobox(
+            form,
+            values=self._inventory_service_values(),
+            textvariable=self.inventory_service_var,
+            font=(FONT, 10),
+        )
+        self.inventory_service_combo.grid(row=3, column=0, sticky="ew", ipady=6, pady=(8, 14))
+
+        tk.Label(form, text="Email / Account", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=4, column=0, sticky="w")
+        tk.Entry(
+            form,
+            textvariable=self.inventory_email_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        ).grid(row=5, column=0, sticky="ew", ipady=8, pady=(8, 14))
+
+        tk.Label(form, text="Password", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=6, column=0, sticky="w")
+        tk.Entry(
+            form,
+            textvariable=self.inventory_password_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        ).grid(row=7, column=0, sticky="ew", ipady=8, pady=(8, 14))
+
+        tk.Label(form, text="Comment", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=8, column=0, sticky="w")
+        self.inventory_comment_text = tk.Text(
+            form,
+            height=8,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+            wrap="word",
+            undo=True,
+        )
+        self.inventory_comment_text.grid(row=9, column=0, sticky="nsew", pady=(8, 16))
+        form.grid_rowconfigure(9, weight=1)
+
+        actions = tk.Frame(form, bg=WHITE)
+        actions.grid(row=10, column=0, sticky="ew")
+        actions.grid_columnconfigure((0, 1), weight=1)
+        self.inventory_save_button = make_button(actions, "Save Inventory", self.save_inventory_item, "primary")
+        self.inventory_save_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        make_button(actions, "Clear Form", self.clear_inventory_form, "light").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
+        list_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        list_card.grid(row=0, column=1, sticky="nsew")
+        body = list_card.body
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=3)
+        body.grid_rowconfigure(3, weight=2)
+        tk.Label(body, text="Active Inventory", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w", pady=(0, 12)
+        )
+
+        self.inventory_tree = ttk.Treeview(body, columns=("service", "email", "updated"), show="headings", selectmode="browse")
+        self.inventory_tree.heading("service", text="Service", anchor="w")
+        self.inventory_tree.heading("email", text="Email / Account", anchor="w")
+        self.inventory_tree.heading("updated", text="Updated", anchor="w")
+        self.inventory_tree.column("service", width=230, minwidth=190, anchor="w", stretch=True)
+        self.inventory_tree.column("email", width=340, minwidth=240, anchor="w", stretch=True)
+        self.inventory_tree.column("updated", width=150, minwidth=135, anchor="w", stretch=False)
+        self.inventory_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
+        self.inventory_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        self.inventory_tree.grid(row=1, column=0, sticky="nsew")
+        self.inventory_tree.bind("<<TreeviewSelect>>", self._on_inventory_selected)
+        inventory_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_tree.yview)
+        inventory_scroll.grid(row=1, column=1, sticky="ns")
+        self.inventory_tree.configure(yscrollcommand=inventory_scroll.set)
+
+        tk.Label(body, text="Selected Preview", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(
+            row=2, column=0, sticky="w", pady=(16, 8)
+        )
+        self.inventory_preview_text = tk.Text(
+            body,
+            height=7,
+            bg="#fbfdff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            font=(FONT, 10),
+            wrap="word",
+        )
+        self.inventory_preview_text.grid(row=3, column=0, sticky="nsew")
+        self.inventory_preview_text.configure(state="disabled")
+        preview_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_preview_text.yview)
+        preview_scroll.grid(row=3, column=1, sticky="ns")
+        self.inventory_preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        list_actions = tk.Frame(body, bg=WHITE)
+        list_actions.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        list_actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(list_actions, "Edit Selected", self.edit_selected_inventory_item, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
+        make_button(list_actions, "Deactivate Selected", self.deactivate_selected_inventory_item, "warning").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+    def _build_service_catalog_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=2)
+        parent.grid_columnconfigure(1, weight=3)
+        parent.grid_rowconfigure(0, weight=1)
+
+        form_card = SurfaceCard(parent, padx=22, pady=20, accent=True, accent_start=BLUE, accent_end=TEAL)
+        form_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        form = form_card.body
+        form.grid_columnconfigure(0, weight=1)
+        self.service_catalog_form_title_label = tk.Label(
+            form,
+            text="Add Item Sold",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+        )
+        self.service_catalog_form_title_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.service_catalog_form_status_label = tk.Label(
+            form,
+            text="Manage the services shown in the employee Items Sold dropdown.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=420,
+            justify="left",
+        )
+        self.service_catalog_form_status_label.grid(row=1, column=0, sticky="w", pady=(0, 16))
+
+        tk.Label(form, text="Service Name", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=2, column=0, sticky="w")
+        tk.Entry(
+            form,
+            textvariable=self.service_catalog_name_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        ).grid(row=3, column=0, sticky="ew", ipady=8, pady=(8, 16))
+
+        actions = tk.Frame(form, bg=WHITE)
+        actions.grid(row=4, column=0, sticky="ew")
+        actions.grid_columnconfigure((0, 1), weight=1)
+        self.service_catalog_save_button = make_button(actions, "Add Item", self.save_service_catalog_item, "primary")
+        self.service_catalog_save_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        make_button(actions, "Clear Form", self.clear_service_catalog_form, "light").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
+        list_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        list_card.grid(row=0, column=1, sticky="nsew")
+        body = list_card.body
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+        tk.Label(body, text="Active Items Sold", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w", pady=(0, 12)
+        )
+        self.service_catalog_tree = ttk.Treeview(body, columns=("service", "updated"), show="headings", selectmode="browse")
+        self.service_catalog_tree.heading("service", text="Service", anchor="w")
+        self.service_catalog_tree.heading("updated", text="Updated", anchor="w")
+        self.service_catalog_tree.column("service", width=360, minwidth=240, anchor="w", stretch=True)
+        self.service_catalog_tree.column("updated", width=145, minwidth=130, anchor="w", stretch=False)
+        self.service_catalog_tree.tag_configure("service_even", background=WHITE, foreground=TEXT)
+        self.service_catalog_tree.tag_configure("service_odd", background="#f8fbff", foreground=TEXT)
+        self.service_catalog_tree.grid(row=1, column=0, sticky="nsew")
+        self.service_catalog_tree.bind("<<TreeviewSelect>>", self._on_service_catalog_selected)
+        service_scroll = ttk.Scrollbar(body, orient="vertical", command=self.service_catalog_tree.yview)
+        service_scroll.grid(row=1, column=1, sticky="ns")
+        self.service_catalog_tree.configure(yscrollcommand=service_scroll.set)
+
+        list_actions = tk.Frame(body, bg=WHITE)
+        list_actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        list_actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(list_actions, "Edit Selected", self.edit_selected_service_catalog_item, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
+        make_button(list_actions, "Remove Selected", self.remove_selected_service_catalog_item, "warning").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+    def _build_cloud_sync_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        card = SurfaceCard(parent, padx=22, pady=20, accent=True, accent_start=NAVY, accent_end=TEAL)
+        card.grid(row=0, column=0, sticky="ew")
+        body = card.body
+        body.grid_columnconfigure(1, weight=1)
+        tk.Label(body, text="Supabase Cloud Sync", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        tk.Label(
+            body,
+            text="Sync employee accounts, announcements, inventory, and service message designs between PCs.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 16))
+
+        tk.Checkbutton(
+            body,
+            text="Enable cloud sync on this device",
+            variable=self.supabase_enabled_var,
+            bg=WHITE,
+            fg=TEXT,
+            activebackground=WHITE,
+            font=(FONT_BOLD, 10),
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 14))
+
+        tk.Label(body, text="Project URL", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=3, column=0, sticky="w")
+        tk.Entry(
+            body,
+            textvariable=self.supabase_url_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+        ).grid(row=4, column=0, columnspan=3, sticky="ew", ipady=8, pady=(8, 14))
+
+        tk.Label(body, text="Anon Public Key", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=5, column=0, sticky="w")
+        tk.Entry(
+            body,
+            textvariable=self.supabase_anon_key_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+            show="*",
+        ).grid(row=6, column=0, columnspan=3, sticky="ew", ipady=8, pady=(8, 14))
+
+        tk.Label(body, text="Admin Write Secret", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=7, column=0, sticky="w")
+        tk.Entry(
+            body,
+            textvariable=self.supabase_admin_secret_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+            show="*",
+        ).grid(row=8, column=0, columnspan=3, sticky="ew", ipady=8, pady=(8, 14))
+
+        tk.Label(body, text="Employee Sync Secret", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=9, column=0, sticky="w")
+        tk.Entry(
+            body,
+            textvariable=self.supabase_employee_sync_secret_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+            show="*",
+        ).grid(row=10, column=0, columnspan=3, sticky="ew", ipady=8, pady=(8, 14))
+
+        actions = tk.Frame(body, bg=WHITE)
+        actions.grid(row=11, column=0, columnspan=3, sticky="ew")
+        actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(actions, "Save Cloud Settings", self.save_cloud_settings, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
+        make_button(actions, "Sync Now", self.run_cloud_sync_now, "success").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
+        status_card = SurfaceCard(parent, padx=22, pady=20, accent=True, accent_start=BLUE, accent_end=TEAL)
+        status_card.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        status = status_card.body
+        status.grid_columnconfigure(0, weight=1)
+        tk.Label(status, text="Cloud Status", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(row=0, column=0, sticky="w")
+        self.cloud_sync_status_label = tk.Label(
+            status,
+            text="",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            anchor="nw",
+            justify="left",
+            wraplength=850,
+        )
+        self.cloud_sync_status_label.grid(row=1, column=0, sticky="ew", pady=(10, 0))
 
     def _build_sales_data_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -913,6 +1309,7 @@ class AdminPage(tk.Frame):
         self.today_pill.configure(text=today_label())
         self.last_refresh_label.configure(text=f"Last refreshed {datetime.now().strftime('%I:%M %p')}")
         self._refresh_excel_settings()
+        self._refresh_cloud_settings()
         self._refresh_dashboard()
         self._refresh_employees()
         shifts = self.app.attendance_store.list_shift_summaries()
@@ -920,7 +1317,9 @@ class AdminPage(tk.Frame):
         self._refresh_shift_table(shifts)
         self._refresh_event_table(self.selected_shift_id)
         self._refresh_announcements()
+        self._refresh_service_catalog()
         self._refresh_message_templates()
+        self._refresh_inventory_items()
         self._refresh_sales_data()
 
     def _refresh_dashboard(self) -> None:
@@ -1272,6 +1671,7 @@ class AdminPage(tk.Frame):
             self._refresh_employee_form_mode()
             self._refresh_employees()
             self.employees_tree.selection_set(username)
+            self.app.request_cloud_sync(push_local=True)
             show_app_alert(self, "Employee added", "Employee can now log in with the shown password.", "success")
             return
 
@@ -1304,6 +1704,7 @@ class AdminPage(tk.Frame):
         self._refresh_employee_form_mode()
         self._refresh_employees()
         self.employees_tree.selection_set(username)
+        self.app.request_cloud_sync(push_local=True)
         alert_message = "Employee details and password were updated." if password_changed else message
         show_app_alert(self, "Employee updated", alert_message, "success")
 
@@ -1320,6 +1721,7 @@ class AdminPage(tk.Frame):
         self.employee_password_var.set(new_password)
         if self.employee_password_status_label is not None:
             self.employee_password_status_label.configure(text=f"New password: {new_password}", fg=SUCCESS)
+        self.app.request_cloud_sync(push_local=True)
         show_app_alert(self, "Password reset", "Give the shown password to the employee.", "success")
 
     def toggle_selected_employee_active(self) -> None:
@@ -1340,6 +1742,7 @@ class AdminPage(tk.Frame):
         self._refresh_employee_active_status_label()
         self._refresh_employees()
         self.employees_tree.selection_set(username)
+        self.app.request_cloud_sync(push_local=True)
         status = "active" if new_state else "frozen"
         show_app_alert(self, "Employee updated", f"Employee is now {status}.", "success")
 
@@ -1360,6 +1763,7 @@ class AdminPage(tk.Frame):
             return
         self.clear_employee_form()
         self._refresh_employees()
+        self.app.request_cloud_sync(push_local=True)
         show_app_alert(self, "Employee removed", message, "success")
 
     def send_announcement(self) -> None:
@@ -1380,6 +1784,7 @@ class AdminPage(tk.Frame):
         self.announcement_title_var.set("")
         self.announcement_message_text.delete("1.0", tk.END)
         self.refresh_all()
+        self.app.request_cloud_sync(push_local=True)
         show_app_alert(
             self,
             "Notification has been sent",
@@ -1413,6 +1818,7 @@ class AdminPage(tk.Frame):
         self.selected_template_id = int(saved["id"])
         self.clear_message_template_form()
         self.refresh_all()
+        self.app.request_cloud_sync(push_local=True)
         show_app_alert(
             self,
             success_title,
@@ -1422,7 +1828,11 @@ class AdminPage(tk.Frame):
 
     def clear_message_template_form(self) -> None:
         self.editing_template_id = None
-        self.template_service_var.set("Capcut Private Monthly")
+        values = self._template_service_values()
+        fallback = "Other"
+        if len(values) > 1:
+            fallback = values[1]
+        self.template_service_var.set(fallback)
         self.template_other_service_var.set("")
         self.template_message_text.delete("1.0", tk.END)
         self._update_template_other_service_visibility()
@@ -1440,7 +1850,7 @@ class AdminPage(tk.Frame):
             return
         self.editing_template_id = template_id
         service_name = template["service_name"]
-        if service_name in {"General", *SALES_SERVICE_NAMES}:
+        if service_name in self._template_service_values():
             self.template_service_var.set(service_name)
             self.template_other_service_var.set("")
         else:
@@ -1470,7 +1880,245 @@ class AdminPage(tk.Frame):
         if self.editing_template_id == template_id:
             self.clear_message_template_form()
         self.refresh_all()
+        self.app.request_cloud_sync(push_local=True)
         show_app_alert(self, "Service message deactivated", "Employees will no longer see this message format.", "success")
+
+    def _refresh_service_catalog_form_state(self) -> None:
+        editing = self.editing_service_catalog_id is not None
+        if self.service_catalog_form_title_label is not None:
+            self.service_catalog_form_title_label.configure(text="Edit Item Sold" if editing else "Add Item Sold")
+        if self.service_catalog_form_status_label is not None:
+            if editing:
+                self.service_catalog_form_status_label.configure(
+                    text="Editing selected service. Existing sales rows stay unchanged.",
+                    fg=BLUE,
+                )
+            else:
+                self.service_catalog_form_status_label.configure(
+                    text="Manage the services shown in the employee Items Sold dropdown.",
+                    fg=MUTED,
+                )
+        if self.service_catalog_save_button is not None:
+            self.service_catalog_save_button.configure(text="Save Changes" if editing else "Add Item")
+
+    def save_service_catalog_item(self) -> None:
+        service_name = self.service_catalog_name_var.get().strip()
+        if not service_name:
+            show_app_alert(self, "Missing service", "Please add the service name.", "warning")
+            return
+        try:
+            if self.editing_service_catalog_id is None:
+                saved = self.app.attendance_store.create_service_catalog_item(service_name, self.app.display_user)
+                title = "Item added"
+            else:
+                saved = self.app.attendance_store.update_service_catalog_item(self.editing_service_catalog_id, service_name)
+                title = "Item updated"
+        except ValueError as exc:
+            show_app_alert(self, "Item not saved", str(exc), "warning")
+            return
+        self.selected_service_catalog_id = int(saved["id"])
+        self.clear_service_catalog_form(clear_selection=False)
+        self._refresh_service_catalog()
+        if self.service_catalog_tree is not None:
+            self.service_catalog_tree.selection_set(str(saved["id"]))
+            self.service_catalog_tree.focus(str(saved["id"]))
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, title, "Employee Items Sold dropdown will use the updated list.", "success")
+
+    def clear_service_catalog_form(self, clear_selection: bool = True) -> None:
+        self.editing_service_catalog_id = None
+        self.service_catalog_name_var.set("")
+        if clear_selection and self.service_catalog_tree is not None:
+            self.service_catalog_tree.selection_remove(*self.service_catalog_tree.selection())
+            self.selected_service_catalog_id = None
+        self._refresh_service_catalog_form_state()
+
+    def edit_selected_service_catalog_item(self) -> None:
+        item = self._service_catalog_by_id(self.selected_service_catalog_id)
+        if item is None:
+            show_app_alert(self, "No item selected", "Select an item sold first.", "warning")
+            return
+        self.editing_service_catalog_id = int(item["id"])
+        self.service_catalog_name_var.set(item["service_name"])
+        self._refresh_service_catalog_form_state()
+
+    def remove_selected_service_catalog_item(self) -> None:
+        item = self._service_catalog_by_id(self.selected_service_catalog_id)
+        if item is None:
+            show_app_alert(self, "No item selected", "Select an item sold first.", "warning")
+            return
+        service_name = item["service_name"]
+        if not messagebox.askyesno(
+            "Remove item sold",
+            f"Remove '{service_name}' from the employee Items Sold dropdown? Existing sales entries will stay unchanged.",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.deactivate_service_catalog_item(int(item["id"]))
+        if self.editing_service_catalog_id == int(item["id"]):
+            self.clear_service_catalog_form(clear_selection=False)
+        self.selected_service_catalog_id = None
+        self._refresh_service_catalog()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, "Item removed", "Employees will no longer see this item in the dropdown.", "success")
+    def _inventory_comment_value(self) -> str:
+        if self.inventory_comment_text is None:
+            return ""
+        return self.inventory_comment_text.get("1.0", tk.END).strip()
+
+    def _refresh_inventory_form_state(self) -> None:
+        editing = self.editing_inventory_id is not None
+        if self.inventory_form_title_label is not None:
+            self.inventory_form_title_label.configure(text="Edit Inventory Item" if editing else "Add Inventory Item")
+        if self.inventory_form_status_label is not None:
+            if editing:
+                self.inventory_form_status_label.configure(
+                    text="Editing selected inventory item. Employees will see the update after cloud sync.",
+                    fg=BLUE,
+                )
+            else:
+                self.inventory_form_status_label.configure(
+                    text="Add service credentials employees can view and copy from their Inventory panel.",
+                    fg=MUTED,
+                )
+        if self.inventory_save_button is not None:
+            self.inventory_save_button.configure(text="Save Changes" if editing else "Save Inventory")
+
+    def save_inventory_item(self) -> None:
+        service_name = self.inventory_service_var.get().strip()
+        account_email = self.inventory_email_var.get().strip()
+        account_password = self.inventory_password_var.get().strip()
+        comment = self._inventory_comment_value()
+        if not service_name:
+            show_app_alert(self, "Missing service", "Please add the service name before saving.", "warning")
+            return
+        if not account_email:
+            show_app_alert(self, "Missing email", "Please add the inventory email/account.", "warning")
+            return
+        if not account_password:
+            show_app_alert(self, "Missing password", "Please add the inventory password.", "warning")
+            return
+        if self.editing_inventory_id is None:
+            saved = self.app.attendance_store.create_inventory_item(
+                service_name,
+                account_email,
+                account_password,
+                comment,
+                self.app.display_user,
+            )
+            success_title = "Inventory saved"
+        else:
+            saved = self.app.attendance_store.update_inventory_item(
+                self.editing_inventory_id,
+                service_name,
+                account_email,
+                account_password,
+                comment,
+            )
+            success_title = "Inventory updated"
+        self.selected_inventory_id = int(saved["id"])
+        self.clear_inventory_form(clear_selection=False)
+        self._refresh_inventory_items()
+        if self.inventory_tree is not None:
+            self.inventory_tree.selection_set(str(saved["id"]))
+            self.inventory_tree.focus(str(saved["id"]))
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, success_title, "Employees can now see this item in Inventory.", "success")
+
+    def clear_inventory_form(self, clear_selection: bool = True) -> None:
+        self.editing_inventory_id = None
+        self.inventory_service_var.set("")
+        self.inventory_email_var.set("")
+        self.inventory_password_var.set("")
+        if self.inventory_comment_text is not None:
+            self.inventory_comment_text.delete("1.0", tk.END)
+        if clear_selection and self.inventory_tree is not None:
+            self.inventory_tree.selection_remove(*self.inventory_tree.selection())
+            self.selected_inventory_id = None
+            self._set_inventory_preview(None)
+        self._refresh_inventory_form_state()
+
+    def edit_selected_inventory_item(self) -> None:
+        item = self._inventory_by_id(self.selected_inventory_id)
+        if item is None:
+            show_app_alert(self, "No inventory selected", "Select an inventory item first.", "warning")
+            return
+        self.editing_inventory_id = int(item["id"])
+        self.inventory_service_var.set(item["service_name"])
+        self.inventory_email_var.set(item["account_email"])
+        self.inventory_password_var.set(item["account_password"])
+        if self.inventory_comment_text is not None:
+            self.inventory_comment_text.delete("1.0", tk.END)
+            self.inventory_comment_text.insert("1.0", item.get("comment", ""))
+        self._refresh_inventory_form_state()
+
+    def deactivate_selected_inventory_item(self) -> None:
+        item = self._inventory_by_id(self.selected_inventory_id)
+        if item is None:
+            show_app_alert(self, "No inventory selected", "Select an inventory item first.", "warning")
+            return
+        label = f"{item['service_name']} / {item['account_email']}"
+        if not messagebox.askyesno(
+            "Deactivate inventory item",
+            f"Deactivate '{label}' so employees no longer see it?",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.deactivate_inventory_item(int(item["id"]))
+        if self.editing_inventory_id == int(item["id"]):
+            self.clear_inventory_form(clear_selection=False)
+        self.selected_inventory_id = None
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, "Inventory deactivated", "Employees will no longer see this item.", "success")
+    def _refresh_cloud_settings(self) -> None:
+        config = self.app.load_supabase_config()
+        self.supabase_enabled_var.set(config.enabled)
+        self.supabase_url_var.set(config.url)
+        self.supabase_anon_key_var.set(config.anon_key)
+        self.supabase_admin_secret_var.set(config.admin_secret)
+        self.supabase_employee_sync_secret_var.set(config.employee_sync_secret)
+        if self.cloud_sync_status_label is not None:
+            if config.is_ready:
+                if config.can_push:
+                    message = "Cloud sync is enabled. This admin device can push employee accounts, announcements, inventory, and service messages."
+                else:
+                    message = "Cloud sync is enabled for reading. Add the admin write secret to push admin changes."
+                if not config.can_pull_users:
+                    message += " Add the employee sync secret to receive employee account updates."
+                self.cloud_sync_status_label.configure(text=message, fg=SUCCESS)
+            else:
+                self.cloud_sync_status_label.configure(
+                    text="Cloud sync is not configured yet. Paste the Supabase Project URL and anon public key, then save.",
+                    fg=MUTED,
+                )
+
+    def set_cloud_sync_status(self, message: str, ok: bool = True) -> None:
+        if self.cloud_sync_status_label is not None:
+            self.cloud_sync_status_label.configure(text=message, fg=SUCCESS if ok else DANGER)
+
+    def save_cloud_settings(self) -> None:
+        config = SupabaseConfig(
+            enabled=self.supabase_enabled_var.get(),
+            url=self.supabase_url_var.get().strip(),
+            anon_key=self.supabase_anon_key_var.get().strip(),
+            admin_secret=self.supabase_admin_secret_var.get().strip(),
+            employee_sync_secret=self.supabase_employee_sync_secret_var.get().strip(),
+        )
+        if config.enabled and (not config.url or not config.anon_key):
+            show_app_alert(self, "Missing Supabase settings", "Project URL and anon public key are required.", "warning")
+            return
+        path = self.app.save_supabase_config(config, write_file=True)
+        self._refresh_cloud_settings()
+        message = "Cloud sync settings were saved for this device."
+        if path is not None:
+            message += f"\nConfig file: {path}"
+        show_app_alert(self, "Cloud settings saved", message, "success")
+        self.app.request_cloud_sync(push_local=True)
+
+    def run_cloud_sync_now(self) -> None:
+        self.set_cloud_sync_status("Cloud sync is running...", ok=True)
+        self.app.request_cloud_sync(push_local=True)
 
     def browse_excel_workbook(self) -> None:
         selected = filedialog.askopenfilename(
@@ -1600,6 +2248,73 @@ class AdminPage(tk.Frame):
             return
         self._set_template_preview(None)
 
+    def _refresh_service_catalog(self) -> None:
+        self._refresh_service_dropdown_values()
+        if self.service_catalog_tree is None:
+            return
+        for item in self.service_catalog_tree.get_children():
+            self.service_catalog_tree.delete(item)
+        self.admin_service_catalog_items = self.app.attendance_store.list_service_catalog(limit=500, active_only=True)
+        valid_ids: set[int] = set()
+        first_id: int | None = None
+        for index, item in enumerate(self.admin_service_catalog_items):
+            item_id = int(item["id"])
+            valid_ids.add(item_id)
+            if first_id is None:
+                first_id = item_id
+            tag = "service_even" if index % 2 == 0 else "service_odd"
+            self.service_catalog_tree.insert(
+                "",
+                "end",
+                iid=str(item_id),
+                tags=(tag,),
+                values=(item["service_name"], self._format_datetime(item["updated_at"])),
+            )
+        if self.selected_service_catalog_id in valid_ids:
+            self.service_catalog_tree.selection_set(str(self.selected_service_catalog_id))
+            self.service_catalog_tree.focus(str(self.selected_service_catalog_id))
+            return
+        self.selected_service_catalog_id = first_id
+        if first_id is not None:
+            self.service_catalog_tree.selection_set(str(first_id))
+            self.service_catalog_tree.focus(str(first_id))
+    def _refresh_inventory_items(self) -> None:
+        if self.inventory_tree is None:
+            return
+        for item in self.inventory_tree.get_children():
+            self.inventory_tree.delete(item)
+        self.admin_inventory_items = self.app.attendance_store.list_inventory_items(limit=500)
+        valid_ids: set[int] = set()
+        first_id: int | None = None
+        for index, item in enumerate(self.admin_inventory_items):
+            item_id = int(item["id"])
+            valid_ids.add(item_id)
+            if first_id is None:
+                first_id = item_id
+            tag = "inventory_even" if index % 2 == 0 else "inventory_odd"
+            self.inventory_tree.insert(
+                "",
+                "end",
+                iid=str(item_id),
+                tags=(tag,),
+                values=(
+                    item["service_name"],
+                    item["account_email"],
+                    self._format_datetime(item["updated_at"]),
+                ),
+            )
+        if self.selected_inventory_id in valid_ids:
+            self.inventory_tree.selection_set(str(self.selected_inventory_id))
+            self.inventory_tree.focus(str(self.selected_inventory_id))
+            self._set_inventory_preview(self._inventory_by_id(self.selected_inventory_id))
+            return
+        self.selected_inventory_id = first_id
+        if first_id is not None:
+            self.inventory_tree.selection_set(str(first_id))
+            self.inventory_tree.focus(str(first_id))
+            self._set_inventory_preview(self._inventory_by_id(first_id))
+            return
+        self._set_inventory_preview(None)
     def _refresh_sales_data(self) -> None:
         self.app.attendance_store.delete_blocked_sales_entries()
         self._refresh_sales_period_values()
@@ -1843,6 +2558,55 @@ class AdminPage(tk.Frame):
             self.template_preview_text.insert("1.0", template["message"])
         self.template_preview_text.configure(state="disabled")
 
+    def _on_service_catalog_selected(self, _event: tk.Event) -> None:
+        if self.service_catalog_tree is None:
+            return
+        selection = self.service_catalog_tree.selection()
+        self.selected_service_catalog_id = int(selection[0]) if selection else None
+
+    def _service_catalog_by_id(self, item_id: int | None) -> dict | None:
+        if item_id is None:
+            return None
+        for item in self.admin_service_catalog_items:
+            if int(item["id"]) == item_id:
+                return item
+        return None
+    def _on_inventory_selected(self, _event: tk.Event) -> None:
+        if self.inventory_tree is None:
+            return
+        selection = self.inventory_tree.selection()
+        self.selected_inventory_id = int(selection[0]) if selection else None
+        self._set_inventory_preview(self._inventory_by_id(self.selected_inventory_id))
+
+    def _inventory_by_id(self, item_id: int | None) -> dict | None:
+        if item_id is None:
+            return None
+        for item in self.admin_inventory_items:
+            if int(item["id"]) == item_id:
+                return item
+        return None
+
+    def _inventory_preview(self, item: dict) -> str:
+        parts = [
+            f"Service: {item.get('service_name', '')}",
+            f"Email: {item.get('account_email', '')}",
+            f"Password: {item.get('account_password', '')}",
+        ]
+        comment = str(item.get("comment", "")).strip()
+        if comment:
+            parts.extend(["", "Comment:", comment])
+        return "\n".join(parts)
+
+    def _set_inventory_preview(self, item: dict | None) -> None:
+        if self.inventory_preview_text is None:
+            return
+        self.inventory_preview_text.configure(state="normal")
+        self.inventory_preview_text.delete("1.0", tk.END)
+        if item is None:
+            self.inventory_preview_text.insert("1.0", "No active inventory items yet.")
+        else:
+            self.inventory_preview_text.insert("1.0", self._inventory_preview(item))
+        self.inventory_preview_text.configure(state="disabled")
     def _refresh_metrics(self, shifts: list[dict]) -> None:
         active_count = sum(1 for shift in shifts if shift["status"] == "active")
         breaks = sum(int(shift["break_count"]) for shift in shifts)

@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - the app can still run without the logo.
     ImageTk = None
 
 from app.auth import AuthStore
+from app.cloud_sync import CloudSyncResult, CloudSyncService, SupabaseConfig, cloud_sync_interval_ms, load_supabase_config, save_supabase_config, write_supabase_config_file
 from app.config import (
     APP_DB_PATH,
     APP_ICON_PATH,
@@ -54,12 +55,17 @@ class EmployeeApp(tk.Tk):
         self.update_check_queue: queue.Queue[UpdateInfo] = queue.Queue()
         self.update_check_started = False
         self.update_check_after_id: str | None = None
+        self.cloud_sync_service = CloudSyncService(self.attendance_store, self.load_supabase_config, self.auth)
+        self.cloud_sync_queue: queue.Queue[CloudSyncResult] = queue.Queue()
+        self.cloud_sync_running = False
+        self.cloud_sync_after_id: str | None = None
 
         self._configure_style()
         self._set_window_icon()
         self._build_pages()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.show_page("login")
+        self._schedule_cloud_sync(3000)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -109,6 +115,7 @@ class EmployeeApp(tk.Tk):
     def show_page(self, name: str) -> None:
         for page in self.pages.values():
             page.pack_forget()
+        self.current_page = name
         page = self.pages[name]
         page.pack(fill="both", expand=True)
         if name in {"dashboard", "admin"}:
@@ -160,6 +167,12 @@ class EmployeeApp(tk.Tk):
             except tk.TclError:
                 pass
             self.update_check_after_id = None
+        if self.cloud_sync_after_id is not None:
+            try:
+                self.after_cancel(self.cloud_sync_after_id)
+            except tk.TclError:
+                pass
+            self.cloud_sync_after_id = None
         self.current_user = ""
         self.current_display_name = ""
         self.current_role = ""
@@ -178,6 +191,91 @@ class EmployeeApp(tk.Tk):
         if display_name.casefold() in registered_usernames:
             return
         self.attendance_store.merge_announcement_read_aliases(self.current_user, [display_name])
+
+    def load_supabase_config(self) -> SupabaseConfig:
+        return load_supabase_config(self.attendance_store)
+
+    def save_supabase_config(self, config: SupabaseConfig, write_file: bool = False):
+        save_supabase_config(self.attendance_store, config)
+        if write_file:
+            return write_supabase_config_file(config)
+        return None
+
+    def request_cloud_sync(self, push_local: bool = False) -> None:
+        self._start_cloud_sync(push_local=push_local, reschedule=False)
+
+    def _schedule_cloud_sync(self, delay_ms: int | None = None) -> None:
+        if self.cloud_sync_after_id is not None:
+            try:
+                self.after_cancel(self.cloud_sync_after_id)
+            except tk.TclError:
+                pass
+        self.cloud_sync_after_id = self.after(delay_ms or cloud_sync_interval_ms(), self._start_cloud_sync)
+
+    def _start_cloud_sync(self, push_local: bool | None = None, reschedule: bool = True) -> None:
+        self.cloud_sync_after_id = None
+        if self.cloud_sync_running:
+            if reschedule:
+                self._schedule_cloud_sync()
+            return
+        config = self.load_supabase_config()
+        if not config.is_ready:
+            if reschedule:
+                self._schedule_cloud_sync()
+            return
+        self.cloud_sync_running = True
+        should_push = self.current_role == "admin" if push_local is None else push_local
+        worker = threading.Thread(target=self._run_cloud_sync_worker, args=(should_push,), daemon=True)
+        worker.start()
+        self.after(250, lambda: self._poll_cloud_sync(reschedule))
+
+    def _run_cloud_sync_worker(self, push_local: bool) -> None:
+        try:
+            result = self.cloud_sync_service.sync(push_local=push_local, pull_remote=True)
+        except Exception as exc:
+            result = CloudSyncResult(enabled=True, ok=False, message=f"Cloud sync failed: {exc}")
+        self.cloud_sync_queue.put(result)
+
+    def _poll_cloud_sync(self, reschedule: bool) -> None:
+        try:
+            result = self.cloud_sync_queue.get_nowait()
+        except queue.Empty:
+            self.after(250, lambda: self._poll_cloud_sync(reschedule))
+            return
+        self.cloud_sync_running = False
+        self._handle_cloud_sync_result(result)
+        if reschedule:
+            self._schedule_cloud_sync()
+
+    def _handle_cloud_sync_result(self, result: CloudSyncResult) -> None:
+        if not result.enabled:
+            return
+        page = self.pages.get(getattr(self, "current_page", ""))
+        if result.changed:
+            if isinstance(page, DashboardPage):
+                page._refresh_notification_badge()
+                page._refresh_service_catalog_values()
+                page._refresh_service_message_templates()
+                page._refresh_inventory_items()
+                if page.notification_dropdown is not None and page.notification_dropdown.winfo_ismapped():
+                    page.notification_dropdown.refresh()
+            elif isinstance(page, AdminPage):
+                page._refresh_employees()
+                page._refresh_announcements()
+                page._refresh_service_catalog()
+                page._refresh_message_templates()
+                page._refresh_inventory_items()
+            if self.current_role == "employee" and self.current_user:
+                current_profile = self.auth.get_user(self.current_user)
+                if current_profile is None or not current_profile.get("is_active", True):
+                    messagebox.showwarning(
+                        "Account not active",
+                        "Your employee account is not active anymore. Please contact the admin.",
+                        parent=self,
+                    )
+                    self.logout()
+        if isinstance(page, AdminPage) and hasattr(page, "set_cloud_sync_status"):
+            page.set_cloud_sync_status(result.message, ok=result.ok)
 
     def start_update_check(self) -> None:
         if self.update_check_started:

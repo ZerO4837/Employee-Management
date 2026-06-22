@@ -5,6 +5,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
+import uuid
+
+from app.config import SALES_SERVICE_NAMES
 
 
 def _now() -> datetime:
@@ -17,6 +20,10 @@ def _iso(value: datetime | None = None) -> str:
 
 def _today() -> str:
     return _now().strftime("%Y-%m-%d")
+
+
+def _default_service_cloud_id(service_name: str) -> str:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"dsp-service-catalog:{service_name.strip().casefold()}").hex
 
 
 def _announcement_cutoff() -> str:
@@ -206,6 +213,39 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS service_catalog (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    service_name TEXT NOT NULL,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    cloud_synced_at TEXT NOT NULL DEFAULT '',
+                    cloud_sync_error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS inventory_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    service_name TEXT NOT NULL,
+                    account_email TEXT NOT NULL DEFAULT '',
+                    account_password TEXT NOT NULL DEFAULT '',
+                    comment TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    cloud_synced_at TEXT NOT NULL DEFAULT '',
+                    cloud_sync_error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS sales_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     employee_username TEXT NOT NULL,
@@ -232,6 +272,7 @@ class AttendanceStore:
                 """
             )
             self._ensure_sales_schema(connection)
+            self._ensure_cloud_schema(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_attendance_shift_lookup
@@ -264,6 +305,13 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_announcements_cloud_id
+                ON announcements (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_announcement_reads_lookup
                 ON announcement_reads (employee_username, announcement_id)
                 """
@@ -284,6 +332,39 @@ class AttendanceStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_service_message_templates_active
                 ON service_message_templates (is_active, service_name, updated_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_service_message_templates_cloud_id
+                ON service_message_templates (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_service_catalog_active
+                ON service_catalog (is_active, service_name, updated_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_service_catalog_cloud_id
+                ON service_catalog (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_inventory_items_active
+                ON inventory_items (is_active, service_name, updated_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_items_cloud_id
+                ON inventory_items (cloud_id)
+                WHERE cloud_id <> ''
                 """
             )
             connection.execute(
@@ -326,6 +407,87 @@ class AttendanceStore:
             WHERE buying_amount = ''
             """
         )
+
+    def _ensure_cloud_schema(self, connection: sqlite3.Connection) -> None:
+        required_columns = {
+            "announcements": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "service_message_templates": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "inventory_items": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "service_catalog": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "created_by": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+        }
+        for table, columns in required_columns.items():
+            existing_columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, definition in columns.items():
+                if name not in existing_columns:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        connection.execute(
+            """
+            UPDATE announcements
+            SET updated_at = created_at
+            WHERE updated_at = ''
+            """
+        )
+        self._seed_service_catalog(connection)
+
+    def _seed_service_catalog(self, connection: sqlite3.Connection) -> None:
+        now = _iso()
+        for service_name in SALES_SERVICE_NAMES:
+            name = service_name.strip()
+            if not name or name == "Other":
+                continue
+            canonical_cloud_id = _default_service_cloud_id(name)
+            rows = connection.execute(
+                "SELECT * FROM service_catalog WHERE LOWER(service_name) = ? ORDER BY is_active DESC, id ASC",
+                (name.casefold(),),
+            ).fetchall()
+            if rows:
+                primary = rows[0]
+                if primary["cloud_id"] != canonical_cloud_id:
+                    canonical_exists = connection.execute(
+                        "SELECT id FROM service_catalog WHERE cloud_id = ?",
+                        (canonical_cloud_id,),
+                    ).fetchone()
+                    if canonical_exists is None:
+                        connection.execute(
+                            """
+                            UPDATE service_catalog
+                            SET cloud_id = ?,
+                                cloud_synced_at = '',
+                                cloud_sync_error = ''
+                            WHERE id = ?
+                            """,
+                            (canonical_cloud_id, int(primary["id"])),
+                        )
+                continue
+            connection.execute(
+                """
+                INSERT INTO service_catalog
+                (cloud_id, service_name, created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, 'System', ?, ?, 1)
+                """,
+                (canonical_cloud_id, name, now, now),
+            )
 
     def get_setting(self, key: str, default: str = "") -> str:
         with self.connect() as connection:
@@ -763,14 +925,15 @@ class AttendanceStore:
 
     def create_announcement(self, category: str, title: str, message: str, created_by: str) -> dict:
         created_at = _iso()
+        cloud_id = uuid.uuid4().hex
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO announcements
-                (category, title, message, created_by, created_at, is_active)
-                VALUES (?, ?, ?, ?, ?, 1)
+                (cloud_id, category, title, message, created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (category.strip(), title.strip(), message.strip(), created_by, created_at),
+                (cloud_id, category.strip(), title.strip(), message.strip(), created_by, created_at, created_at),
             )
             row = connection.execute("SELECT * FROM announcements WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
         created = _row_to_dict(row)
@@ -900,6 +1063,759 @@ class AttendanceStore:
                 tuple(normalized_aliases),
             )
 
+    def list_cloud_pending_announcements(self, limit: int = 100) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM announcements
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ensure_announcement_cloud_id(self, announcement_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
+            if row is None:
+                raise ValueError("Announcement could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            cloud_id = uuid.uuid4().hex
+            updated_at = row["updated_at"] or row["created_at"] or _iso()
+            connection.execute(
+                """
+                UPDATE announcements
+                SET cloud_id = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (cloud_id, updated_at, announcement_id),
+            )
+            row = connection.execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
+        item = _row_to_dict(row)
+        if item is None:
+            raise ValueError("Announcement could not be found.")
+        return item
+
+    def mark_announcement_cloud_sync(self, announcement_id: int) -> None:
+        synced_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE announcements
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (synced_at, announcement_id),
+            )
+
+    def mark_announcement_cloud_error(self, announcement_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE announcements
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], announcement_id),
+            )
+
+    def import_cloud_announcement(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        if not cloud_id:
+            return False
+        created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or created_at)
+        is_active = 1 if bool(item.get("is_active", True)) else 0
+        values = (
+            str(item.get("category", "")),
+            str(item.get("title", "")),
+            str(item.get("message", "")),
+            str(item.get("created_by", "")),
+            created_at,
+            updated_at,
+            is_active,
+            _iso(),
+            cloud_id,
+        )
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM announcements WHERE cloud_id = ?",
+                (cloud_id,),
+            ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or existing["created_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE announcements
+                    SET category = ?,
+                        title = ?,
+                        message = ?,
+                        created_by = ?,
+                        created_at = ?,
+                        updated_at = ?,
+                        is_active = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    values,
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO announcements
+                (cloud_id, category, title, message, created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    str(item.get("category", "")),
+                    str(item.get("title", "")),
+                    str(item.get("message", "")),
+                    str(item.get("created_by", "")),
+                    created_at,
+                    updated_at,
+                    is_active,
+                    _iso(),
+                ),
+            )
+        return True
+
+    def list_service_catalog(self, limit: int = 300, active_only: bool = True) -> list[dict]:
+        with self.connect() as connection:
+            if active_only:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM service_catalog
+                    WHERE is_active = 1
+                    ORDER BY service_name COLLATE NOCASE ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM service_catalog
+                    ORDER BY is_active DESC, service_name COLLATE NOCASE ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_service_names(self, include_other: bool = True) -> list[str]:
+        names = [item["service_name"] for item in self.list_service_catalog(limit=500, active_only=True)]
+        if include_other and "Other" not in names:
+            names.append("Other")
+        return names
+
+    def _service_catalog_duplicate(self, connection: sqlite3.Connection, service_name: str, exclude_id: int | None = None) -> sqlite3.Row | None:
+        normalized = service_name.strip().casefold()
+        if exclude_id is None:
+            return connection.execute(
+                "SELECT * FROM service_catalog WHERE LOWER(service_name) = ? AND is_active = 1",
+                (normalized,),
+            ).fetchone()
+        return connection.execute(
+            "SELECT * FROM service_catalog WHERE LOWER(service_name) = ? AND id <> ? AND is_active = 1",
+            (normalized, exclude_id),
+        ).fetchone()
+
+    def create_service_catalog_item(self, service_name: str, created_by: str) -> dict:
+        name = service_name.strip()
+        if not name or name == "Other":
+            raise ValueError("Service name is required.")
+        now = _iso()
+        with self.connect() as connection:
+            duplicate = self._service_catalog_duplicate(connection, name)
+            if duplicate is not None:
+                raise ValueError("This service already exists in the active Items Sold list.")
+            inactive = connection.execute(
+                "SELECT * FROM service_catalog WHERE LOWER(service_name) = ? AND is_active = 0 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                (name.casefold(),),
+            ).fetchone()
+            if inactive is not None:
+                connection.execute(
+                    """
+                    UPDATE service_catalog
+                    SET service_name = ?,
+                        created_by = ?,
+                        updated_at = ?,
+                        is_active = 1,
+                        cloud_synced_at = '',
+                        cloud_sync_error = ''
+                    WHERE id = ?
+                    """,
+                    (name, created_by, now, int(inactive["id"])),
+                )
+                row = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (int(inactive["id"]),)).fetchone()
+            else:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO service_catalog
+                    (cloud_id, service_name, created_by, created_at, updated_at, is_active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    """,
+                    (uuid.uuid4().hex, name, created_by, now, now),
+                )
+                row = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Failed to create service item.")
+        return created
+
+    def update_service_catalog_item(self, item_id: int, service_name: str) -> dict:
+        name = service_name.strip()
+        if not name or name == "Other":
+            raise ValueError("Service name is required.")
+        updated_at = _iso()
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                raise ValueError("Service item could not be found.")
+            duplicate = self._service_catalog_duplicate(connection, name, exclude_id=item_id)
+            if duplicate is not None:
+                raise ValueError("This service already exists in the active Items Sold list.")
+            connection.execute(
+                """
+                UPDATE service_catalog
+                SET service_name = ?,
+                    updated_at = ?,
+                    is_active = 1,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (name, updated_at, item_id),
+            )
+            updated = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (item_id,)).fetchone()
+        item = _row_to_dict(updated)
+        if item is None:
+            raise RuntimeError("Failed to update service item.")
+        return item
+
+    def deactivate_service_catalog_item(self, item_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_catalog
+                SET is_active = 0,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), item_id),
+            )
+
+    def list_cloud_pending_service_catalog(self, limit: int = 300) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM service_catalog
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ensure_service_catalog_cloud_id(self, item_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                raise ValueError("Service item could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            cloud_id = uuid.uuid4().hex
+            updated_at = row["updated_at"] or row["created_at"] or _iso()
+            connection.execute(
+                """
+                UPDATE service_catalog
+                SET cloud_id = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (cloud_id, updated_at, item_id),
+            )
+            row = connection.execute("SELECT * FROM service_catalog WHERE id = ?", (item_id,)).fetchone()
+        item = _row_to_dict(row)
+        if item is None:
+            raise ValueError("Service item could not be found.")
+        return item
+
+    def mark_service_catalog_cloud_sync(self, item_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_catalog
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), item_id),
+            )
+
+    def mark_service_catalog_cloud_error(self, item_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_catalog
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], item_id),
+            )
+
+    def import_cloud_service_catalog_item(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        service_name = str(item.get("service_name", "")).strip()
+        if not cloud_id or not service_name or service_name == "Other":
+            return False
+        created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or created_at)
+        is_active = 1 if bool(item.get("is_active", True)) else 0
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM service_catalog WHERE cloud_id = ?",
+                (cloud_id,),
+            ).fetchone()
+            if existing is None:
+                existing = connection.execute(
+                    "SELECT * FROM service_catalog WHERE LOWER(service_name) = ? ORDER BY is_active DESC, id ASC LIMIT 1",
+                    (service_name.casefold(),),
+                ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or existing["created_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE service_catalog
+                    SET cloud_id = ?,
+                        service_name = ?,
+                        created_by = ?,
+                        created_at = ?,
+                        updated_at = ?,
+                        is_active = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE id = ?
+                    """,
+                    (
+                        cloud_id,
+                        service_name,
+                        str(item.get("created_by", "")),
+                        created_at,
+                        updated_at,
+                        is_active,
+                        _iso(),
+                        int(existing["id"]),
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO service_catalog
+                (cloud_id, service_name, created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    service_name,
+                    str(item.get("created_by", "")),
+                    created_at,
+                    updated_at,
+                    is_active,
+                    _iso(),
+                ),
+            )
+        return True
+    def create_inventory_item(
+        self,
+        service_name: str,
+        account_email: str,
+        account_password: str,
+        comment: str,
+        created_by: str,
+    ) -> dict:
+        created_at = _iso()
+        cloud_id = uuid.uuid4().hex
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO inventory_items
+                (cloud_id, service_name, account_email, account_password, comment, created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    cloud_id,
+                    service_name.strip(),
+                    account_email.strip(),
+                    account_password.strip(),
+                    comment.strip(),
+                    created_by,
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Failed to create inventory item.")
+        return created
+
+    def update_inventory_item(
+        self,
+        item_id: int,
+        service_name: str,
+        account_email: str,
+        account_password: str,
+        comment: str,
+    ) -> dict:
+        updated_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_items
+                SET service_name = ?,
+                    account_email = ?,
+                    account_password = ?,
+                    comment = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ? AND is_active = 1
+                """,
+                (service_name.strip(), account_email.strip(), account_password.strip(), comment.strip(), updated_at, item_id),
+            )
+            row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise RuntimeError("Failed to update inventory item.")
+        return updated
+
+    def deactivate_inventory_item(self, item_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_items
+                SET is_active = 0,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), item_id),
+            )
+
+    def list_inventory_items(self, limit: int = 500, active_only: bool = True) -> list[dict]:
+        with self.connect() as connection:
+            if active_only:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM inventory_items
+                    WHERE is_active = 1
+                    ORDER BY service_name COLLATE NOCASE ASC, account_email COLLATE NOCASE ASC, updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM inventory_items
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cloud_pending_inventory_items(self, limit: int = 200) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM inventory_items
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ensure_inventory_item_cloud_id(self, item_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                raise ValueError("Inventory item could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            cloud_id = uuid.uuid4().hex
+            updated_at = row["updated_at"] or row["created_at"] or _iso()
+            connection.execute(
+                """
+                UPDATE inventory_items
+                SET cloud_id = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (cloud_id, updated_at, item_id),
+            )
+            row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        item = _row_to_dict(row)
+        if item is None:
+            raise ValueError("Inventory item could not be found.")
+        return item
+
+    def mark_inventory_item_cloud_sync(self, item_id: int) -> None:
+        synced_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_items
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (synced_at, item_id),
+            )
+
+    def mark_inventory_item_cloud_error(self, item_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_items
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], item_id),
+            )
+
+    def import_cloud_inventory_item(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        if not cloud_id:
+            return False
+        service_name = str(item.get("service_name", "")).strip()
+        if not service_name:
+            return False
+        created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or created_at)
+        is_active = 1 if bool(item.get("is_active", True)) else 0
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM inventory_items WHERE cloud_id = ?",
+                (cloud_id,),
+            ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or existing["created_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE inventory_items
+                    SET service_name = ?,
+                        account_email = ?,
+                        account_password = ?,
+                        comment = ?,
+                        created_by = ?,
+                        created_at = ?,
+                        updated_at = ?,
+                        is_active = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    (
+                        service_name,
+                        str(item.get("account_email", "")),
+                        str(item.get("account_password", "")),
+                        str(item.get("comment", "")),
+                        str(item.get("created_by", "")),
+                        created_at,
+                        updated_at,
+                        is_active,
+                        _iso(),
+                        cloud_id,
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO inventory_items
+                (cloud_id, service_name, account_email, account_password, comment, created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    service_name,
+                    str(item.get("account_email", "")),
+                    str(item.get("account_password", "")),
+                    str(item.get("comment", "")),
+                    str(item.get("created_by", "")),
+                    created_at,
+                    updated_at,
+                    is_active,
+                    _iso(),
+                ),
+            )
+        return True
+    def list_cloud_pending_service_message_templates(self, limit: int = 150) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM service_message_templates
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ensure_service_message_template_cloud_id(self, template_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM service_message_templates WHERE id = ?", (template_id,)).fetchone()
+            if row is None:
+                raise ValueError("Service message could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            cloud_id = uuid.uuid4().hex
+            updated_at = row["updated_at"] or row["created_at"] or _iso()
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET cloud_id = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (cloud_id, updated_at, template_id),
+            )
+            row = connection.execute("SELECT * FROM service_message_templates WHERE id = ?", (template_id,)).fetchone()
+        item = _row_to_dict(row)
+        if item is None:
+            raise ValueError("Service message could not be found.")
+        return item
+
+    def mark_service_message_template_cloud_sync(self, template_id: int) -> None:
+        synced_at = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (synced_at, template_id),
+            )
+
+    def mark_service_message_template_cloud_error(self, template_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE service_message_templates
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], template_id),
+            )
+
+    def import_cloud_service_message_template(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        if not cloud_id:
+            return False
+        service_name = str(item.get("service_name", "")).strip()
+        if not service_name:
+            return False
+        created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or created_at)
+        is_active = 1 if bool(item.get("is_active", True)) else 0
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM service_message_templates WHERE cloud_id = ?",
+                (cloud_id,),
+            ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or existing["created_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE service_message_templates
+                    SET service_name = ?,
+                        title = ?,
+                        message = ?,
+                        created_by = ?,
+                        created_at = ?,
+                        updated_at = ?,
+                        is_active = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    (
+                        service_name,
+                        str(item.get("title") or service_name),
+                        str(item.get("message", "")),
+                        str(item.get("created_by", "")),
+                        created_at,
+                        updated_at,
+                        is_active,
+                        _iso(),
+                        cloud_id,
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO service_message_templates
+                (cloud_id, service_name, title, message, created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    service_name,
+                    str(item.get("title") or service_name),
+                    str(item.get("message", "")),
+                    str(item.get("created_by", "")),
+                    created_at,
+                    updated_at,
+                    is_active,
+                    _iso(),
+                ),
+            )
+        return True
     def create_service_message_template(
         self,
         service_name: str,
@@ -907,6 +1823,7 @@ class AttendanceStore:
         created_by: str,
     ) -> dict:
         created_at = _iso()
+        cloud_id = uuid.uuid4().hex
         service_name = service_name.strip()
         message = message.strip()
         with self.connect() as connection:
@@ -923,10 +1840,10 @@ class AttendanceStore:
             cursor = connection.execute(
                 """
                 INSERT INTO service_message_templates
-                (service_name, title, message, created_by, created_at, updated_at, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                (cloud_id, service_name, title, message, created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (service_name, service_name, message, created_by, created_at, created_at),
+                (cloud_id, service_name, service_name, message, created_by, created_at, created_at),
             )
             row = connection.execute(
                 "SELECT * FROM service_message_templates WHERE id = ?",
@@ -968,7 +1885,9 @@ class AttendanceStore:
                 SET service_name = ?,
                     title = ?,
                     message = ?,
-                    updated_at = ?
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ? AND is_active = 1
                 """,
                 (service_name, service_name, message, updated_at, template_id),
@@ -1011,7 +1930,9 @@ class AttendanceStore:
                 """
                 UPDATE service_message_templates
                 SET is_active = 0,
-                    updated_at = ?
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ?
                 """,
                 (_iso(), template_id),
