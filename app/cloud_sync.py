@@ -117,6 +117,11 @@ class CloudSyncService:
         pushed = 0
         pulled = 0
         try:
+            if push_local and config.can_pull_users:
+                pushed += self._push_attendance_days(client, config.user_sync_secret)
+                pushed += self._push_attendance_shifts(client, config.user_sync_secret)
+                pushed += self._push_attendance_day_events(client, config.user_sync_secret)
+                pushed += self._push_attendance_events(client, config.user_sync_secret)
             if push_local and config.can_push:
                 pushed += self._push_employee_users(client, config.admin_secret)
                 pushed += self._push_announcements(client, config.admin_secret)
@@ -127,6 +132,11 @@ class CloudSyncService:
                 if config.can_pull_users:
                     pulled += self._pull_employee_users(client, config.user_sync_secret)
                     pulled += self._pull_inventory_items(client, config.user_sync_secret)
+                if config.can_push:
+                    pulled += self._pull_attendance_days(client, config.admin_secret)
+                    pulled += self._pull_attendance_shifts(client, config.admin_secret)
+                    pulled += self._pull_attendance_day_events(client, config.admin_secret)
+                    pulled += self._pull_attendance_events(client, config.admin_secret)
                 pulled += self._pull_announcements(client)
                 pulled += self._pull_service_catalog(client)
                 pulled += self._pull_service_templates(client)
@@ -213,6 +223,75 @@ class CloudSyncService:
                 raise
         return pushed
 
+    def _push_attendance_days(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_attendance_days(limit=200):
+            local_id = int(row["id"])
+            row = self.store.ensure_attendance_day_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_attendance_day",
+                    {"sync_secret": sync_secret, "row_data": self._attendance_day_payload(row)},
+                )
+                self.store.mark_attendance_day_cloud_sync(local_id)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_attendance_day_cloud_error(local_id, str(exc))
+                raise
+        return pushed
+
+    def _push_attendance_shifts(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_attendance_shifts(limit=200):
+            local_id = int(row["id"])
+            row = self.store.ensure_attendance_shift_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_attendance_shift",
+                    {"sync_secret": sync_secret, "row_data": self._attendance_shift_payload(row)},
+                )
+                self.store.mark_attendance_shift_cloud_sync(local_id)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_attendance_shift_cloud_error(local_id, str(exc))
+                raise
+        return pushed
+
+    def _push_attendance_day_events(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_attendance_day_events(limit=300):
+            local_id = int(row["id"])
+            day = self.store.ensure_attendance_day_cloud_id(int(row["day_id"]))
+            row = self.store.ensure_attendance_day_event_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_attendance_day_event",
+                    {"sync_secret": sync_secret, "row_data": self._attendance_day_event_payload(row, day["cloud_id"])},
+                )
+                self.store.mark_attendance_day_event_cloud_sync(local_id)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_attendance_day_event_cloud_error(local_id, str(exc))
+                raise
+        return pushed
+
+    def _push_attendance_events(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_attendance_events(limit=300):
+            local_id = int(row["id"])
+            shift = self.store.ensure_attendance_shift_cloud_id(int(row["shift_id"]))
+            row = self.store.ensure_attendance_event_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_attendance_event",
+                    {"sync_secret": sync_secret, "row_data": self._attendance_event_payload(row, shift["cloud_id"])},
+                )
+                self.store.mark_attendance_event_cloud_sync(local_id)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_attendance_event_cloud_error(local_id, str(exc))
+                raise
+        return pushed
     def _push_employee_users(self, client: SupabaseRestClient, admin_secret: str) -> int:
         if self.auth_store is None:
             return 0
@@ -243,6 +322,45 @@ class CloudSyncService:
                 changed += 1
         return changed
 
+    def _pull_attendance_days(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        rows = client.rpc("dsp_list_attendance_days", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_attendance_day(row):
+                changed += 1
+        return changed
+
+    def _pull_attendance_shifts(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        rows = client.rpc("dsp_list_attendance_shifts", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_attendance_shift(row):
+                changed += 1
+        return changed
+
+    def _pull_attendance_day_events(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        rows = client.rpc("dsp_list_attendance_day_events", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_attendance_day_event(row):
+                changed += 1
+        return changed
+
+    def _pull_attendance_events(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        rows = client.rpc("dsp_list_attendance_events", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_attendance_event(row):
+                changed += 1
+        return changed
     def _pull_announcements(self, client: SupabaseRestClient) -> int:
         rows = client.select(
             "dsp_announcements",
@@ -298,6 +416,58 @@ class CloudSyncService:
                 changed += 1
         return changed
 
+    def _attendance_day_payload(self, row: dict) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "employee_username": row.get("employee_username", ""),
+            "day_date": row.get("day_date", ""),
+            "status": row.get("status", ""),
+            "started_at": row.get("started_at", ""),
+            "ended_at": row.get("ended_at") or "",
+            "updated_at": row.get("updated_at") or row.get("ended_at") or row.get("started_at", ""),
+        }
+
+    def _attendance_shift_payload(self, row: dict) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "employee_username": row.get("employee_username", ""),
+            "shift_date": row.get("shift_date", ""),
+            "shift_number": int(row.get("shift_number") or 0),
+            "status": row.get("status", ""),
+            "started_at": row.get("started_at", ""),
+            "ended_at": row.get("ended_at") or "",
+            "break_count": int(row.get("break_count") or 0),
+            "total_break_seconds": int(row.get("total_break_seconds") or 0),
+            "current_break_started_at": row.get("current_break_started_at") or "",
+            "updated_at": row.get("updated_at") or row.get("ended_at") or row.get("started_at", ""),
+        }
+
+    def _attendance_day_event_payload(self, row: dict, day_cloud_id: str) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "day_cloud_id": day_cloud_id,
+            "employee_username": row.get("employee_username", ""),
+            "day_date": row.get("day_date", ""),
+            "event_type": row.get("event_type", ""),
+            "event_label": row.get("event_label", ""),
+            "event_time": row.get("event_time", ""),
+            "details": row.get("details", ""),
+            "updated_at": row.get("updated_at") or row.get("event_time", ""),
+        }
+
+    def _attendance_event_payload(self, row: dict, shift_cloud_id: str) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "shift_cloud_id": shift_cloud_id,
+            "employee_username": row.get("employee_username", ""),
+            "shift_date": row.get("shift_date", ""),
+            "shift_number": int(row.get("shift_number") or 0),
+            "event_type": row.get("event_type", ""),
+            "event_label": row.get("event_label", ""),
+            "event_time": row.get("event_time", ""),
+            "details": row.get("details", ""),
+            "updated_at": row.get("updated_at") or row.get("event_time", ""),
+        }
     def _service_catalog_payload(self, row: dict) -> dict:
         return {
             "cloud_id": row.get("cloud_id", ""),

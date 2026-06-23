@@ -3,7 +3,7 @@
 -- IMPORTANT: Change CHANGE_THIS_ADMIN_SECRET before running, then use the same value in the app Admin > Cloud Sync tab.
 -- IMPORTANT: Change CHANGE_THIS_EMPLOYEE_SYNC_SECRET before running, then use that value on employee PCs so they can pull employee account updates.
 
-create extension if not exists pgcrypto;
+create extension if not exists pgcrypto with schema extensions;
 
 create table if not exists public.dsp_cloud_settings (
   setting_key text primary key,
@@ -12,13 +12,13 @@ create table if not exists public.dsp_cloud_settings (
 );
 
 insert into public.dsp_cloud_settings (setting_key, setting_value, updated_at)
-values ('admin_secret_hash', encode(digest('CHANGE_THIS_ADMIN_SECRET', 'sha256'), 'hex'), now())
+values ('admin_secret_hash', encode(extensions.digest('CHANGE_THIS_ADMIN_SECRET', 'sha256'), 'hex'), now())
 on conflict (setting_key) do update
 set setting_value = excluded.setting_value,
     updated_at = now();
 
 insert into public.dsp_cloud_settings (setting_key, setting_value, updated_at)
-values ('employee_sync_secret_hash', encode(digest('CHANGE_THIS_EMPLOYEE_SYNC_SECRET', 'sha256'), 'hex'), now())
+values ('employee_sync_secret_hash', encode(extensions.digest('CHANGE_THIS_EMPLOYEE_SYNC_SECRET', 'sha256'), 'hex'), now())
 on conflict (setting_key) do update
 set setting_value = excluded.setting_value,
     updated_at = now();
@@ -94,11 +94,77 @@ create table if not exists public.dsp_inventory_items (
 create index if not exists dsp_inventory_items_active_idx
 on public.dsp_inventory_items (is_active, service_name, account_email, updated_at desc);
 
+create table if not exists public.dsp_attendance_days (
+  cloud_id text primary key,
+  employee_username text not null default '',
+  day_date date not null,
+  status text not null default 'active',
+  started_at timestamptz not null default now(),
+  ended_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists dsp_attendance_days_lookup_idx
+on public.dsp_attendance_days (employee_username, day_date desc, status, updated_at desc);
+
+create table if not exists public.dsp_attendance_shifts (
+  cloud_id text primary key,
+  employee_username text not null default '',
+  shift_date date not null,
+  shift_number integer not null default 1,
+  status text not null default 'active',
+  started_at timestamptz not null default now(),
+  ended_at timestamptz,
+  break_count integer not null default 0,
+  total_break_seconds integer not null default 0,
+  current_break_started_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists dsp_attendance_shifts_lookup_idx
+on public.dsp_attendance_shifts (employee_username, shift_date desc, shift_number, status, updated_at desc);
+
+create table if not exists public.dsp_attendance_day_events (
+  cloud_id text primary key,
+  day_cloud_id text not null default '',
+  employee_username text not null default '',
+  day_date date not null,
+  event_type text not null default '',
+  event_label text not null default '',
+  event_time timestamptz not null default now(),
+  details text not null default '',
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists dsp_attendance_day_events_lookup_idx
+on public.dsp_attendance_day_events (employee_username, day_date desc, event_time desc);
+
+create table if not exists public.dsp_attendance_events (
+  cloud_id text primary key,
+  shift_cloud_id text not null default '',
+  employee_username text not null default '',
+  shift_date date not null,
+  shift_number integer not null default 1,
+  event_type text not null default '',
+  event_label text not null default '',
+  event_time timestamptz not null default now(),
+  details text not null default '',
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists dsp_attendance_events_lookup_idx
+on public.dsp_attendance_events (employee_username, shift_date desc, shift_number, event_time desc);
+
+alter table public.dsp_cloud_settings enable row level security;
 alter table public.dsp_announcements enable row level security;
 alter table public.dsp_service_message_templates enable row level security;
 alter table public.dsp_service_catalog enable row level security;
 alter table public.dsp_employee_users enable row level security;
 alter table public.dsp_inventory_items enable row level security;
+alter table public.dsp_attendance_days enable row level security;
+alter table public.dsp_attendance_shifts enable row level security;
+alter table public.dsp_attendance_day_events enable row level security;
+alter table public.dsp_attendance_events enable row level security;
 
 revoke all on table public.dsp_cloud_settings from anon, authenticated;
 revoke insert, update, delete on table public.dsp_announcements from anon, authenticated;
@@ -106,6 +172,10 @@ revoke insert, update, delete on table public.dsp_service_message_templates from
 revoke insert, update, delete on table public.dsp_service_catalog from anon, authenticated;
 revoke all on table public.dsp_employee_users from anon, authenticated;
 revoke all on table public.dsp_inventory_items from anon, authenticated;
+revoke all on table public.dsp_attendance_days from anon, authenticated;
+revoke all on table public.dsp_attendance_shifts from anon, authenticated;
+revoke all on table public.dsp_attendance_day_events from anon, authenticated;
+revoke all on table public.dsp_attendance_events from anon, authenticated;
 grant select on table public.dsp_announcements to anon;
 grant select on table public.dsp_service_message_templates to anon;
 grant select on table public.dsp_service_catalog to anon;
@@ -137,7 +207,7 @@ language sql
 security definer
 set search_path = public
 as $$
-  select encode(digest(coalesce(admin_secret, ''), 'sha256'), 'hex') = coalesce(
+  select encode(extensions.digest(coalesce(admin_secret, ''), 'sha256'), 'hex') = coalesce(
     (select setting_value from public.dsp_cloud_settings where setting_key = 'admin_secret_hash'),
     ''
   );
@@ -149,7 +219,7 @@ language sql
 security definer
 set search_path = public
 as $$
-  select public.dsp_admin_secret_valid(sync_secret) or encode(digest(coalesce(sync_secret, ''), 'sha256'), 'hex') = coalesce(
+  select public.dsp_admin_secret_valid(sync_secret) or encode(extensions.digest(coalesce(sync_secret, ''), 'sha256'), 'hex') = coalesce(
     (select setting_value from public.dsp_cloud_settings where setting_key = 'employee_sync_secret_hash'),
     ''
   );
@@ -415,6 +485,304 @@ begin
 end;
 $$;
 
+create or replace function public.dsp_upsert_attendance_day(sync_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'cloud_id', ''));
+  if key_value = '' then
+    raise exception 'Attendance day cloud_id is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_attendance_days (
+    cloud_id, employee_username, day_date, status, started_at, ended_at, updated_at
+  )
+  values (
+    key_value,
+    coalesce(row_data->>'employee_username', ''),
+    coalesce(nullif(row_data->>'day_date', '')::date, now()::date),
+    coalesce(row_data->>'status', 'active'),
+    coalesce(nullif(row_data->>'started_at', '')::timestamptz, now()),
+    nullif(row_data->>'ended_at', '')::timestamptz,
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (cloud_id) do update set
+    employee_username = excluded.employee_username,
+    day_date = excluded.day_date,
+    status = excluded.status,
+    started_at = excluded.started_at,
+    ended_at = excluded.ended_at,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_upsert_attendance_shift(sync_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'cloud_id', ''));
+  if key_value = '' then
+    raise exception 'Attendance shift cloud_id is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_attendance_shifts (
+    cloud_id, employee_username, shift_date, shift_number, status, started_at, ended_at,
+    break_count, total_break_seconds, current_break_started_at, updated_at
+  )
+  values (
+    key_value,
+    coalesce(row_data->>'employee_username', ''),
+    coalesce(nullif(row_data->>'shift_date', '')::date, now()::date),
+    coalesce(nullif(row_data->>'shift_number', '')::integer, 1),
+    coalesce(row_data->>'status', 'active'),
+    coalesce(nullif(row_data->>'started_at', '')::timestamptz, now()),
+    nullif(row_data->>'ended_at', '')::timestamptz,
+    coalesce(nullif(row_data->>'break_count', '')::integer, 0),
+    coalesce(nullif(row_data->>'total_break_seconds', '')::integer, 0),
+    nullif(row_data->>'current_break_started_at', '')::timestamptz,
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (cloud_id) do update set
+    employee_username = excluded.employee_username,
+    shift_date = excluded.shift_date,
+    shift_number = excluded.shift_number,
+    status = excluded.status,
+    started_at = excluded.started_at,
+    ended_at = excluded.ended_at,
+    break_count = excluded.break_count,
+    total_break_seconds = excluded.total_break_seconds,
+    current_break_started_at = excluded.current_break_started_at,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_upsert_attendance_day_event(sync_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'cloud_id', ''));
+  if key_value = '' then
+    raise exception 'Attendance day event cloud_id is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_attendance_day_events (
+    cloud_id, day_cloud_id, employee_username, day_date, event_type, event_label, event_time, details, updated_at
+  )
+  values (
+    key_value,
+    coalesce(row_data->>'day_cloud_id', ''),
+    coalesce(row_data->>'employee_username', ''),
+    coalesce(nullif(row_data->>'day_date', '')::date, now()::date),
+    coalesce(row_data->>'event_type', ''),
+    coalesce(row_data->>'event_label', ''),
+    coalesce(nullif(row_data->>'event_time', '')::timestamptz, now()),
+    coalesce(row_data->>'details', ''),
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (cloud_id) do update set
+    day_cloud_id = excluded.day_cloud_id,
+    employee_username = excluded.employee_username,
+    day_date = excluded.day_date,
+    event_type = excluded.event_type,
+    event_label = excluded.event_label,
+    event_time = excluded.event_time,
+    details = excluded.details,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_upsert_attendance_event(sync_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'cloud_id', ''));
+  if key_value = '' then
+    raise exception 'Attendance event cloud_id is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_attendance_events (
+    cloud_id, shift_cloud_id, employee_username, shift_date, shift_number, event_type, event_label, event_time, details, updated_at
+  )
+  values (
+    key_value,
+    coalesce(row_data->>'shift_cloud_id', ''),
+    coalesce(row_data->>'employee_username', ''),
+    coalesce(nullif(row_data->>'shift_date', '')::date, now()::date),
+    coalesce(nullif(row_data->>'shift_number', '')::integer, 1),
+    coalesce(row_data->>'event_type', ''),
+    coalesce(row_data->>'event_label', ''),
+    coalesce(nullif(row_data->>'event_time', '')::timestamptz, now()),
+    coalesce(row_data->>'details', ''),
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (cloud_id) do update set
+    shift_cloud_id = excluded.shift_cloud_id,
+    employee_username = excluded.employee_username,
+    shift_date = excluded.shift_date,
+    shift_number = excluded.shift_number,
+    event_type = excluded.event_type,
+    event_label = excluded.event_label,
+    event_time = excluded.event_time,
+    details = excluded.details,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_list_attendance_days(admin_secret text)
+returns table (
+  cloud_id text,
+  employee_username text,
+  day_date date,
+  status text,
+  started_at timestamptz,
+  ended_at timestamptz,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select d.cloud_id, d.employee_username, d.day_date, d.status, d.started_at, d.ended_at, d.updated_at
+  from public.dsp_attendance_days d
+  order by d.updated_at desc, d.started_at desc
+  limit 3000;
+end;
+$$;
+
+create or replace function public.dsp_list_attendance_shifts(admin_secret text)
+returns table (
+  cloud_id text,
+  employee_username text,
+  shift_date date,
+  shift_number integer,
+  status text,
+  started_at timestamptz,
+  ended_at timestamptz,
+  break_count integer,
+  total_break_seconds integer,
+  current_break_started_at timestamptz,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select s.cloud_id, s.employee_username, s.shift_date, s.shift_number, s.status, s.started_at, s.ended_at,
+         s.break_count, s.total_break_seconds, s.current_break_started_at, s.updated_at
+  from public.dsp_attendance_shifts s
+  order by s.updated_at desc, s.started_at desc
+  limit 3000;
+end;
+$$;
+
+create or replace function public.dsp_list_attendance_day_events(admin_secret text)
+returns table (
+  cloud_id text,
+  day_cloud_id text,
+  employee_username text,
+  day_date date,
+  event_type text,
+  event_label text,
+  event_time timestamptz,
+  details text,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select e.cloud_id, e.day_cloud_id, e.employee_username, e.day_date, e.event_type, e.event_label,
+         e.event_time, e.details, e.updated_at
+  from public.dsp_attendance_day_events e
+  order by e.event_time desc
+  limit 5000;
+end;
+$$;
+
+create or replace function public.dsp_list_attendance_events(admin_secret text)
+returns table (
+  cloud_id text,
+  shift_cloud_id text,
+  employee_username text,
+  shift_date date,
+  shift_number integer,
+  event_type text,
+  event_label text,
+  event_time timestamptz,
+  details text,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select e.cloud_id, e.shift_cloud_id, e.employee_username, e.shift_date, e.shift_number,
+         e.event_type, e.event_label, e.event_time, e.details, e.updated_at
+  from public.dsp_attendance_events e
+  order by e.event_time desc
+  limit 5000;
+end;
+$$;
 grant execute on function public.dsp_admin_secret_valid(text) to anon;
 grant execute on function public.dsp_employee_sync_secret_valid(text) to anon;
 grant execute on function public.dsp_upsert_employee_user(text, jsonb) to anon;
@@ -422,5 +790,13 @@ grant execute on function public.dsp_list_employee_users(text) to anon;
 grant execute on function public.dsp_upsert_service_catalog_item(text, jsonb) to anon;
 grant execute on function public.dsp_upsert_inventory_item(text, jsonb) to anon;
 grant execute on function public.dsp_list_inventory_items(text) to anon;
+grant execute on function public.dsp_upsert_attendance_day(text, jsonb) to anon;
+grant execute on function public.dsp_upsert_attendance_shift(text, jsonb) to anon;
+grant execute on function public.dsp_upsert_attendance_day_event(text, jsonb) to anon;
+grant execute on function public.dsp_upsert_attendance_event(text, jsonb) to anon;
+grant execute on function public.dsp_list_attendance_days(text) to anon;
+grant execute on function public.dsp_list_attendance_shifts(text) to anon;
+grant execute on function public.dsp_list_attendance_day_events(text) to anon;
+grant execute on function public.dsp_list_attendance_events(text) to anon;
 grant execute on function public.dsp_upsert_announcement(text, jsonb) to anon;
 grant execute on function public.dsp_upsert_service_message_template(text, jsonb) to anon;

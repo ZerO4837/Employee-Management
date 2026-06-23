@@ -254,7 +254,7 @@ For two different PCs to stay linked, the next step will be one shared sync laye
 
 ## Supabase Scope
 
-Supabase is currently used for registered employee accounts, the Items Sold list, inventory credentials, admin-controlled announcements, and service message templates. Attendance, notes, sales entries, and Excel sync still use the local app database/OneDrive workflow unless you decide to move those online later.
+Supabase is currently used for registered employee accounts, attendance records, the Items Sold list, inventory credentials, admin-controlled announcements, and service message templates. Notes, sales entries, and Excel sync still use the local app database/OneDrive workflow unless you decide to move those online later.
 
 Do not put the Supabase `service_role` key inside the desktop app, public repository, or packaged `.exe`.
 
@@ -276,7 +276,7 @@ pyinstaller --noconsole --name "Digital Service Pakistan Employee" --icon "asset
 
 ## Supabase Cloud Sync
 
-The app now supports Supabase sync for registered employee accounts, the Items Sold list, inventory credentials, admin announcements, and service message templates, so different PCs can share admin-to-employee updates.
+The app now supports Supabase sync for registered employee accounts, attendance records, the Items Sold list, inventory credentials, admin announcements, and service message templates, so different PCs can share admin-to-employee updates and the admin PC can see employee attendance.
 
 The admin panel includes an Items Sold List tab. Add, rename, or remove services there to control the employee Sold Item Entry dropdown without editing code.
 

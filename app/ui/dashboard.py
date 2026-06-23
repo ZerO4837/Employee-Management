@@ -2374,10 +2374,14 @@ class DashboardPage(tk.Frame):
             total += int((datetime.now() - self.break_started_at).total_seconds())
         return total
 
+    def _request_attendance_cloud_sync(self) -> None:
+        self.app.request_cloud_sync(push_local=True)
+
     def add_attendance_event(self, event: str, details: str = "") -> None:
         if self.current_shift_id is not None:
             self.app.attendance_store.add_event(self.current_shift_id, event.lower().replace(" ", "_"), event, details)
         self.refresh_all()
+        self._request_attendance_cloud_sync()
 
     def start_day(self) -> None:
         day = self.app.attendance_store.start_day(self._employee_username())
@@ -2386,6 +2390,7 @@ class DashboardPage(tk.Frame):
             self.refresh_all()
             return
         self.refresh_all()
+        self._request_attendance_cloud_sync()
 
     def end_day(self) -> None:
         self._sync_attendance_state()
@@ -2400,6 +2405,7 @@ class DashboardPage(tk.Frame):
             messagebox.showinfo("Day not started", "Please start the day first.")
             return
         self.refresh_all()
+        self._request_attendance_cloud_sync()
         self.show_view("overview")
 
     def check_in(self) -> None:
@@ -2413,6 +2419,7 @@ class DashboardPage(tk.Frame):
         shift = self.app.attendance_store.start_shift(self._employee_username())
         self.current_shift_id = int(shift["id"])
         self.refresh_all()
+        self._request_attendance_cloud_sync()
 
     def start_break(self) -> None:
         if not self._require_shift_active():
@@ -2423,6 +2430,7 @@ class DashboardPage(tk.Frame):
         if self.current_shift_id is not None:
             self.app.attendance_store.start_break(self.current_shift_id)
         self.refresh_all()
+        self._request_attendance_cloud_sync()
 
     def end_break(self) -> None:
         if not self._require_shift_active():
@@ -2433,6 +2441,7 @@ class DashboardPage(tk.Frame):
         if self.current_shift_id is not None:
             self.app.attendance_store.end_break(self.current_shift_id)
         self.refresh_all()
+        self._request_attendance_cloud_sync()
 
     def close_first_shift(self) -> None:
         if not self._require_shift_active():
@@ -2451,6 +2460,7 @@ class DashboardPage(tk.Frame):
                 "First shift ended; night shift can be started later.",
             )
         self.refresh_all()
+        self._request_attendance_cloud_sync()
         self.show_view("overview")
 
     def check_out(self) -> None:
@@ -2468,6 +2478,7 @@ class DashboardPage(tk.Frame):
                 f"{shift_label} ended.",
             )
         self.refresh_all()
+        self._request_attendance_cloud_sync()
         if self.current_view in self.SHIFT_LOCKED_VIEWS:
             self.show_view("overview")
 

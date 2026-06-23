@@ -224,7 +224,7 @@ class EmployeeApp(tk.Tk):
                 self._schedule_cloud_sync()
             return
         self.cloud_sync_running = True
-        should_push = self.current_role == "admin" if push_local is None else push_local
+        should_push = self.current_role in {"admin", "employee"} if push_local is None else push_local
         worker = threading.Thread(target=self._run_cloud_sync_worker, args=(should_push,), daemon=True)
         worker.start()
         self.after(250, lambda: self._poll_cloud_sync(reschedule))
@@ -260,6 +260,11 @@ class EmployeeApp(tk.Tk):
                 if page.notification_dropdown is not None and page.notification_dropdown.winfo_ismapped():
                     page.notification_dropdown.refresh()
             elif isinstance(page, AdminPage):
+                page._refresh_dashboard()
+                shifts = self.attendance_store.list_shift_summaries()
+                page._refresh_metrics(shifts)
+                page._refresh_shift_table(shifts)
+                page._refresh_event_table(page.selected_shift_id)
                 page._refresh_employees()
                 page._refresh_announcements()
                 page._refresh_service_catalog()

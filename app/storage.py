@@ -299,6 +299,40 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_days_cloud_id
+                ON attendance_days (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_day_events_cloud_id
+                ON attendance_day_events (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_shifts_cloud_id
+                ON attendance_shifts (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_events_cloud_id
+                ON attendance_events (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attendance_cloud_pending
+                ON attendance_shifts (cloud_synced_at, updated_at)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_announcements_active
                 ON announcements (is_active, created_at)
                 """
@@ -410,6 +444,30 @@ class AttendanceStore:
 
     def _ensure_cloud_schema(self, connection: sqlite3.Connection) -> None:
         required_columns = {
+            "attendance_days": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "attendance_day_events": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "attendance_shifts": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "attendance_events": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
             "announcements": {
                 "cloud_id": "TEXT NOT NULL DEFAULT ''",
                 "updated_at": "TEXT NOT NULL DEFAULT ''",
@@ -441,6 +499,34 @@ class AttendanceStore:
             for name, definition in columns.items():
                 if name not in existing_columns:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        connection.execute(
+            """
+            UPDATE attendance_days
+            SET updated_at = COALESCE(NULLIF(ended_at, ''), started_at)
+            WHERE updated_at = ''
+            """
+        )
+        connection.execute(
+            """
+            UPDATE attendance_day_events
+            SET updated_at = event_time
+            WHERE updated_at = ''
+            """
+        )
+        connection.execute(
+            """
+            UPDATE attendance_shifts
+            SET updated_at = COALESCE(NULLIF(ended_at, ''), started_at)
+            WHERE updated_at = ''
+            """
+        )
+        connection.execute(
+            """
+            UPDATE attendance_events
+            SET updated_at = event_time
+            WHERE updated_at = ''
+            """
+        )
         connection.execute(
             """
             UPDATE announcements
@@ -665,14 +751,19 @@ class AttendanceStore:
         active_day = self.get_active_day(employee_username)
         if active_day is None:
             return None
+        ended_at = _iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE attendance_days
-                SET status = 'closed', ended_at = ?
+                SET status = 'closed',
+                    ended_at = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ?
                 """,
-                (_iso(), active_day["id"]),
+                (ended_at, ended_at, active_day["id"]),
             )
         self.add_day_event(int(active_day["id"]), "day_end", "Day Ended", "Attendance day closed")
         return self.get_day(int(active_day["id"]))
@@ -768,14 +859,19 @@ class AttendanceStore:
         if shift["current_break_started_at"]:
             return shift
 
+        started_at = _iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE attendance_shifts
-                SET current_break_started_at = ?, break_count = break_count + 1
+                SET current_break_started_at = ?,
+                    break_count = break_count + 1,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ?
                 """,
-                (_iso(), shift_id),
+                (started_at, started_at, shift_id),
             )
         self.add_event(shift_id, "break_start", "Break Started", "Break timer running")
         refreshed = self.get_shift(shift_id)
@@ -792,15 +888,19 @@ class AttendanceStore:
             return shift, 0
 
         elapsed = int((_now() - datetime.fromisoformat(started_at)).total_seconds())
+        updated_at = _iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE attendance_shifts
                 SET current_break_started_at = NULL,
-                    total_break_seconds = total_break_seconds + ?
+                    total_break_seconds = total_break_seconds + ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ?
                 """,
-                (max(elapsed, 0), shift_id),
+                (max(elapsed, 0), updated_at, shift_id),
             )
         self.add_event(shift_id, "break_end", "Break Ended", f"Duration: {max(elapsed, 0) // 60}m")
         refreshed = self.get_shift(shift_id)
@@ -812,14 +912,20 @@ class AttendanceStore:
         shift = self.get_shift(shift_id)
         if shift is None:
             raise ValueError(f"Shift {shift_id} does not exist.")
+        ended_at = _iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE attendance_shifts
-                SET status = 'closed', ended_at = ?, current_break_started_at = NULL
+                SET status = 'closed',
+                    ended_at = ?,
+                    current_break_started_at = NULL,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ?
                 """,
-                (_iso(), shift_id),
+                (ended_at, ended_at, shift_id),
             )
         self.add_event(shift_id, event_type, event_label, details)
         refreshed = self.get_shift(shift_id)
@@ -923,6 +1029,454 @@ class AttendanceStore:
         events.sort(key=lambda item: (item["event_time"], int(item["id"])))
         return events[:limit]
 
+    def _attendance_updated_at(self, row: sqlite3.Row | dict, *fallback_keys: str) -> str:
+        for key in ("updated_at", *fallback_keys):
+            try:
+                value = row[key]  # type: ignore[index]
+            except (KeyError, IndexError):
+                value = ""
+            if value:
+                return str(value)
+        return _iso()
+
+    def _list_cloud_pending_attendance(self, table: str, updated_expr: str, limit: int) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < {updated_expr}
+                    OR cloud_sync_error <> ''
+                ORDER BY {updated_expr} ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cloud_pending_attendance_days(self, limit: int = 200) -> list[dict]:
+        return self._list_cloud_pending_attendance(
+            "attendance_days",
+            "COALESCE(NULLIF(updated_at, ''), NULLIF(ended_at, ''), started_at)",
+            limit,
+        )
+
+    def list_cloud_pending_attendance_day_events(self, limit: int = 300) -> list[dict]:
+        return self._list_cloud_pending_attendance(
+            "attendance_day_events",
+            "COALESCE(NULLIF(updated_at, ''), event_time)",
+            limit,
+        )
+
+    def list_cloud_pending_attendance_shifts(self, limit: int = 200) -> list[dict]:
+        return self._list_cloud_pending_attendance(
+            "attendance_shifts",
+            "COALESCE(NULLIF(updated_at, ''), NULLIF(ended_at, ''), started_at)",
+            limit,
+        )
+
+    def list_cloud_pending_attendance_events(self, limit: int = 300) -> list[dict]:
+        return self._list_cloud_pending_attendance(
+            "attendance_events",
+            "COALESCE(NULLIF(updated_at, ''), event_time)",
+            limit,
+        )
+
+    def _ensure_attendance_cloud_id(self, table: str, row_id: int, *fallback_keys: str) -> dict:
+        with self.connect() as connection:
+            row = connection.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+            if row is None:
+                raise ValueError("Attendance row could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            cloud_id = uuid.uuid4().hex
+            updated_at = self._attendance_updated_at(row, *fallback_keys)
+            connection.execute(
+                f"""
+                UPDATE {table}
+                SET cloud_id = ?,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (cloud_id, updated_at, row_id),
+            )
+            row = connection.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+        item = _row_to_dict(row)
+        if item is None:
+            raise ValueError("Attendance row could not be found.")
+        return item
+
+    def ensure_attendance_day_cloud_id(self, day_id: int) -> dict:
+        return self._ensure_attendance_cloud_id("attendance_days", day_id, "ended_at", "started_at")
+
+    def ensure_attendance_day_event_cloud_id(self, event_id: int) -> dict:
+        return self._ensure_attendance_cloud_id("attendance_day_events", event_id, "event_time")
+
+    def ensure_attendance_shift_cloud_id(self, shift_id: int) -> dict:
+        return self._ensure_attendance_cloud_id("attendance_shifts", shift_id, "ended_at", "started_at")
+
+    def ensure_attendance_event_cloud_id(self, event_id: int) -> dict:
+        return self._ensure_attendance_cloud_id("attendance_events", event_id, "event_time")
+
+    def _mark_attendance_cloud_sync(self, table: str, row_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                UPDATE {table}
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), row_id),
+            )
+
+    def _mark_attendance_cloud_error(self, table: str, row_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                UPDATE {table}
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], row_id),
+            )
+
+    def mark_attendance_day_cloud_sync(self, day_id: int) -> None:
+        self._mark_attendance_cloud_sync("attendance_days", day_id)
+
+    def mark_attendance_day_event_cloud_sync(self, event_id: int) -> None:
+        self._mark_attendance_cloud_sync("attendance_day_events", event_id)
+
+    def mark_attendance_shift_cloud_sync(self, shift_id: int) -> None:
+        self._mark_attendance_cloud_sync("attendance_shifts", shift_id)
+
+    def mark_attendance_event_cloud_sync(self, event_id: int) -> None:
+        self._mark_attendance_cloud_sync("attendance_events", event_id)
+
+    def mark_attendance_day_cloud_error(self, day_id: int, error: str) -> None:
+        self._mark_attendance_cloud_error("attendance_days", day_id, error)
+
+    def mark_attendance_day_event_cloud_error(self, event_id: int, error: str) -> None:
+        self._mark_attendance_cloud_error("attendance_day_events", event_id, error)
+
+    def mark_attendance_shift_cloud_error(self, shift_id: int, error: str) -> None:
+        self._mark_attendance_cloud_error("attendance_shifts", shift_id, error)
+
+    def mark_attendance_event_cloud_error(self, event_id: int, error: str) -> None:
+        self._mark_attendance_cloud_error("attendance_events", event_id, error)
+
+    def import_cloud_attendance_day(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        employee_username = str(item.get("employee_username", "")).strip()
+        day_date = str(item.get("day_date", "")).strip()
+        if not cloud_id or not employee_username or not day_date:
+            return False
+        started_at = str(item.get("started_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or item.get("ended_at") or started_at)
+        ended_at = item.get("ended_at") or None
+        with self.connect() as connection:
+            existing = connection.execute("SELECT * FROM attendance_days WHERE cloud_id = ?", (cloud_id,)).fetchone()
+            if existing is None:
+                existing = connection.execute(
+                    "SELECT * FROM attendance_days WHERE employee_username = ? AND day_date = ?",
+                    (employee_username, day_date),
+                ).fetchone()
+            if existing is not None:
+                local_updated = self._attendance_updated_at(existing, "ended_at", "started_at")
+                if existing["cloud_id"] == cloud_id and local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE attendance_days
+                    SET cloud_id = ?,
+                        employee_username = ?,
+                        day_date = ?,
+                        status = ?,
+                        started_at = ?,
+                        ended_at = ?,
+                        updated_at = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE id = ?
+                    """,
+                    (
+                        cloud_id,
+                        employee_username,
+                        day_date,
+                        str(item.get("status", "active")),
+                        started_at,
+                        ended_at,
+                        updated_at,
+                        _iso(),
+                        int(existing["id"]),
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO attendance_days
+                (cloud_id, employee_username, day_date, status, started_at, ended_at, updated_at, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    employee_username,
+                    day_date,
+                    str(item.get("status", "active")),
+                    started_at,
+                    ended_at,
+                    updated_at,
+                    _iso(),
+                ),
+            )
+        return True
+
+    def import_cloud_attendance_shift(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        employee_username = str(item.get("employee_username", "")).strip()
+        shift_date = str(item.get("shift_date", "")).strip()
+        if not cloud_id or not employee_username or not shift_date:
+            return False
+        shift_number = int(item.get("shift_number") or 1)
+        started_at = str(item.get("started_at") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or item.get("ended_at") or started_at)
+        ended_at = item.get("ended_at") or None
+        current_break_started_at = item.get("current_break_started_at") or None
+        with self.connect() as connection:
+            existing = connection.execute("SELECT * FROM attendance_shifts WHERE cloud_id = ?", (cloud_id,)).fetchone()
+            if existing is None:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM attendance_shifts
+                    WHERE employee_username = ? AND shift_date = ? AND shift_number = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (employee_username, shift_date, shift_number),
+                ).fetchone()
+            if existing is not None:
+                local_updated = self._attendance_updated_at(existing, "ended_at", "started_at")
+                if existing["cloud_id"] == cloud_id and local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE attendance_shifts
+                    SET cloud_id = ?,
+                        employee_username = ?,
+                        shift_date = ?,
+                        shift_number = ?,
+                        status = ?,
+                        started_at = ?,
+                        ended_at = ?,
+                        break_count = ?,
+                        total_break_seconds = ?,
+                        current_break_started_at = ?,
+                        updated_at = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE id = ?
+                    """,
+                    (
+                        cloud_id,
+                        employee_username,
+                        shift_date,
+                        shift_number,
+                        str(item.get("status", "active")),
+                        started_at,
+                        ended_at,
+                        int(item.get("break_count") or 0),
+                        int(item.get("total_break_seconds") or 0),
+                        current_break_started_at,
+                        updated_at,
+                        _iso(),
+                        int(existing["id"]),
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO attendance_shifts
+                (cloud_id, employee_username, shift_date, shift_number, status, started_at, ended_at, break_count, total_break_seconds, current_break_started_at, updated_at, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    employee_username,
+                    shift_date,
+                    shift_number,
+                    str(item.get("status", "active")),
+                    started_at,
+                    ended_at,
+                    int(item.get("break_count") or 0),
+                    int(item.get("total_break_seconds") or 0),
+                    current_break_started_at,
+                    updated_at,
+                    _iso(),
+                ),
+            )
+        return True
+
+    def import_cloud_attendance_day_event(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        day_cloud_id = str(item.get("day_cloud_id", "")).strip()
+        employee_username = str(item.get("employee_username", "")).strip()
+        day_date = str(item.get("day_date", "")).strip()
+        if not cloud_id or not employee_username or not day_date:
+            return False
+        event_time = str(item.get("event_time") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or event_time)
+        with self.connect() as connection:
+            day = None
+            if day_cloud_id:
+                day = connection.execute("SELECT * FROM attendance_days WHERE cloud_id = ?", (day_cloud_id,)).fetchone()
+            if day is None:
+                day = connection.execute(
+                    "SELECT * FROM attendance_days WHERE employee_username = ? AND day_date = ?",
+                    (employee_username, day_date),
+                ).fetchone()
+            if day is None:
+                return False
+            existing = connection.execute("SELECT * FROM attendance_day_events WHERE cloud_id = ?", (cloud_id,)).fetchone()
+            if existing is not None:
+                local_updated = self._attendance_updated_at(existing, "event_time")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE attendance_day_events
+                    SET day_id = ?,
+                        employee_username = ?,
+                        day_date = ?,
+                        event_type = ?,
+                        event_label = ?,
+                        event_time = ?,
+                        details = ?,
+                        updated_at = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    (
+                        int(day["id"]),
+                        employee_username,
+                        day_date,
+                        str(item.get("event_type", "")),
+                        str(item.get("event_label", "")),
+                        event_time,
+                        str(item.get("details", "")),
+                        updated_at,
+                        _iso(),
+                        cloud_id,
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO attendance_day_events
+                (cloud_id, day_id, employee_username, day_date, event_type, event_label, event_time, details, updated_at, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    int(day["id"]),
+                    employee_username,
+                    day_date,
+                    str(item.get("event_type", "")),
+                    str(item.get("event_label", "")),
+                    event_time,
+                    str(item.get("details", "")),
+                    updated_at,
+                    _iso(),
+                ),
+            )
+        return True
+
+    def import_cloud_attendance_event(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        shift_cloud_id = str(item.get("shift_cloud_id", "")).strip()
+        employee_username = str(item.get("employee_username", "")).strip()
+        shift_date = str(item.get("shift_date", "")).strip()
+        if not cloud_id or not employee_username or not shift_date:
+            return False
+        shift_number = int(item.get("shift_number") or 1)
+        event_time = str(item.get("event_time") or item.get("updated_at") or _iso())
+        updated_at = str(item.get("updated_at") or event_time)
+        with self.connect() as connection:
+            shift = None
+            if shift_cloud_id:
+                shift = connection.execute("SELECT * FROM attendance_shifts WHERE cloud_id = ?", (shift_cloud_id,)).fetchone()
+            if shift is None:
+                shift = connection.execute(
+                    """
+                    SELECT * FROM attendance_shifts
+                    WHERE employee_username = ? AND shift_date = ? AND shift_number = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (employee_username, shift_date, shift_number),
+                ).fetchone()
+            if shift is None:
+                return False
+            existing = connection.execute("SELECT * FROM attendance_events WHERE cloud_id = ?", (cloud_id,)).fetchone()
+            if existing is not None:
+                local_updated = self._attendance_updated_at(existing, "event_time")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE attendance_events
+                    SET shift_id = ?,
+                        employee_username = ?,
+                        shift_date = ?,
+                        shift_number = ?,
+                        event_type = ?,
+                        event_label = ?,
+                        event_time = ?,
+                        details = ?,
+                        updated_at = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    (
+                        int(shift["id"]),
+                        employee_username,
+                        shift_date,
+                        shift_number,
+                        str(item.get("event_type", "")),
+                        str(item.get("event_label", "")),
+                        event_time,
+                        str(item.get("details", "")),
+                        updated_at,
+                        _iso(),
+                        cloud_id,
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO attendance_events
+                (cloud_id, shift_id, employee_username, shift_date, shift_number, event_type, event_label, event_time, details, updated_at, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    int(shift["id"]),
+                    employee_username,
+                    shift_date,
+                    shift_number,
+                    str(item.get("event_type", "")),
+                    str(item.get("event_label", "")),
+                    event_time,
+                    str(item.get("details", "")),
+                    updated_at,
+                    _iso(),
+                ),
+            )
+        return True
     def create_announcement(self, category: str, title: str, message: str, created_by: str) -> dict:
         created_at = _iso()
         cloud_id = uuid.uuid4().hex
