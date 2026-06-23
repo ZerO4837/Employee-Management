@@ -12,9 +12,10 @@ except Exception:  # pragma: no cover - the app can still run without the logo.
     ImageOps = None
     ImageTk = None
 
-from app.auth import AuthStore
+from app.auth import BOOTSTRAP_FILENAME, AuthStore
 from app.cloud_sync import CloudSyncResult, CloudSyncService, SupabaseConfig, cloud_sync_interval_ms, load_supabase_config, save_supabase_config, write_supabase_config_file
 from app.config import (
+    ADMIN_USERNAME,
     APP_DB_PATH,
     APP_ICON_PATH,
     APP_NAME,
@@ -127,6 +128,8 @@ class EmployeeApp(tk.Tk):
             login_page = self.pages.get("login")
             if hasattr(login_page, "clear_login_error"):
                 login_page.clear_login_error()
+            if hasattr(login_page, "remember_successful_username"):
+                login_page.remember_successful_username(user["username"])
             self.current_user = user["username"]
             self.current_display_name = user.get("display_name", user["username"])
             self.current_role = user["role"]
@@ -141,7 +144,14 @@ class EmployeeApp(tk.Tk):
                     "Your account is not active. Please contact the admin to reactivate your employee access."
                 )
             else:
-                login_page.show_login_error("Username or password is incorrect. Please check the details and try again.")
+                bootstrap_path = AUTH_CONFIG_PATH.parent / BOOTSTRAP_FILENAME
+                if username.strip().casefold() == ADMIN_USERNAME.casefold() and bootstrap_path.exists():
+                    login_page.show_login_error(
+                        "Admin password is saved in the private bootstrap file on this PC. "
+                        f"Open this file and use the Admin password:\n{bootstrap_path}"
+                    )
+                else:
+                    login_page.show_login_error("Username or password is incorrect. Please check the details and try again.")
 
     def logout(self) -> None:
         self.current_user = ""

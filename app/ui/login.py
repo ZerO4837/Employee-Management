@@ -9,7 +9,6 @@ from app.config import (
     BUSINESS_NAME,
     CYAN,
     DANGER,
-    DEFAULT_USERNAME,
     FONT,
     FONT_BOLD,
     LINE,
@@ -181,8 +180,17 @@ class LoginPage(tk.Frame):
     def __init__(self, parent: tk.Misc, app) -> None:
         super().__init__(parent, bg=BG)
         self.app = app
-        self.username_var = tk.StringVar(value=DEFAULT_USERNAME)
+        remembered_username = ""
+        remember_username = False
+        try:
+            remember_username = self.app.attendance_store.get_setting("login_remember_username", "0") == "1"
+            if remember_username:
+                remembered_username = self.app.attendance_store.get_setting("login_last_username", "")
+        except Exception:
+            remember_username = False
+        self.username_var = tk.StringVar(value=remembered_username)
         self.password_var = tk.StringVar()
+        self.remember_username_var = tk.BooleanVar(value=remember_username)
         self.show_password_var = tk.BooleanVar(value=False)
         self.error_panel: tk.Frame | None = None
         self.error_message_label: tk.Label | None = None
@@ -250,7 +258,28 @@ class LoginPage(tk.Frame):
 
         self.username_entry = self._entry(body, "Username", self.username_var, 4, "username")
         self.password_entry = self._entry(body, "Password", self.password_var, 6, "password", show="*")
-        self.username_entry.focus_set()
+        remember_row = tk.Frame(body, bg=WHITE)
+        remember_row.grid(row=8, column=0, sticky="ew", pady=(0, 14))
+        remember_check = tk.Checkbutton(
+            remember_row,
+            text="Remember username",
+            variable=self.remember_username_var,
+            bg=WHITE,
+            fg=TEXT,
+            activebackground=WHITE,
+            activeforeground=TEXT,
+            selectcolor=WHITE,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(FONT_BOLD, 10),
+            command=self._handle_remember_toggle,
+        )
+        remember_check.grid(row=0, column=0, sticky="w")
+        if self.username_var.get().strip():
+            self.password_entry.focus_set()
+        else:
+            self.username_entry.focus_set()
 
         self.error_panel = tk.Frame(
             body,
@@ -260,7 +289,7 @@ class LoginPage(tk.Frame):
             highlightbackground="#f0c3ca",
             highlightthickness=1,
         )
-        self.error_panel.grid(row=8, column=0, sticky="ew", pady=(0, 16))
+        self.error_panel.grid(row=9, column=0, sticky="ew", pady=(0, 16))
         self.error_panel.grid_columnconfigure(1, weight=1)
         tk.Label(
             self.error_panel,
@@ -291,13 +320,13 @@ class LoginPage(tk.Frame):
         self.error_panel.grid_remove()
 
         action_row = tk.Frame(body, bg=WHITE)
-        action_row.grid(row=9, column=0, sticky="ew")
+        action_row.grid(row=10, column=0, sticky="ew")
         action_row.grid_columnconfigure(0, weight=1)
         self.sign_in_button = make_button(action_row, "Unlock Workspace", self._submit_login, "primary")
         self.sign_in_button.grid(row=0, column=0, sticky="ew", pady=(2, 12))
 
         bottom_row = tk.Frame(body, bg=WHITE)
-        bottom_row.grid(row=10, column=0, sticky="ew")
+        bottom_row.grid(row=11, column=0, sticky="ew")
         bottom_row.grid_columnconfigure(0, weight=1)
         forgot = tk.Button(
             bottom_row,
@@ -430,6 +459,26 @@ class LoginPage(tk.Frame):
     def clear_login_error(self) -> None:
         if self.error_panel is not None:
             self.error_panel.grid_remove()
+
+    def remember_successful_username(self, username: str) -> None:
+        try:
+            if self.remember_username_var.get():
+                self.app.attendance_store.set_setting("login_remember_username", "1")
+                self.app.attendance_store.set_setting("login_last_username", username.strip())
+            else:
+                self.app.attendance_store.set_setting("login_remember_username", "0")
+                self.app.attendance_store.set_setting("login_last_username", "")
+        except Exception:
+            pass
+
+    def _handle_remember_toggle(self) -> None:
+        if self.remember_username_var.get():
+            return
+        try:
+            self.app.attendance_store.set_setting("login_remember_username", "0")
+            self.app.attendance_store.set_setting("login_last_username", "")
+        except Exception:
+            pass
 
     def _submit_login(self) -> None:
         self.clear_login_error()
