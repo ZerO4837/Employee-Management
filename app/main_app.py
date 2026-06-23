@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import os
 import queue
 import threading
 import tkinter as tk
@@ -36,12 +38,30 @@ from app.ui.reset_password import ResetPasswordPage
 from app.ui.widgets import configure_treeview
 
 
+def _enable_windows_dpi_awareness() -> None:
+    """Make Tk report real screen pixels instead of being upscaled by Windows.
+
+    Without this, Windows display scaling (common on small/high-DPI laptop
+    screens) silently stretches the whole window past the visible screen,
+    which is what hides bottom controls on smaller laptops.
+    """
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 class EmployeeApp(tk.Tk):
     def __init__(self) -> None:
+        _enable_windows_dpi_awareness()
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1220x780")
-        self.minsize(1080, 700)
+        self._configure_window_geometry()
         self.configure(bg=BG)
 
         self.auth = AuthStore(AUTH_CONFIG_PATH)
@@ -67,6 +87,16 @@ class EmployeeApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.show_page("login")
         self._schedule_cloud_sync(3000)
+
+    def _configure_window_geometry(self) -> None:
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = max(1000, min(1220, screen_width - 60))
+        height = max(620, min(780, screen_height - 90))
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, (screen_height - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(min(1000, width), min(620, height))
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)

@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 
 from app.config import SALES_SERVICE_NAMES
+from app.utils import normalize_local_timestamp, parse_local_datetime
 
 
 def _now() -> datetime:
@@ -20,6 +21,33 @@ def _iso(value: datetime | None = None) -> str:
 
 def _today() -> str:
     return _now().strftime("%Y-%m-%d")
+
+
+_CLOUD_TIMESTAMP_FIELDS = (
+    "created_at",
+    "updated_at",
+    "started_at",
+    "ended_at",
+    "event_time",
+    "current_break_started_at",
+    "deleted_at",
+)
+
+
+def _normalize_cloud_timestamps(item: dict) -> dict:
+    """Reformat any offset-aware timestamps from a synced Supabase row to naive local time.
+
+    Without this, a value pulled from the cloud keeps its UTC offset while
+    every locally created timestamp is naive, and mixing the two later
+    raises `TypeError` the first time something subtracts them (e.g.
+    computing elapsed break time).
+    """
+    normalized = dict(item)
+    for field in _CLOUD_TIMESTAMP_FIELDS:
+        value = normalized.get(field)
+        if value:
+            normalized[field] = normalize_local_timestamp(str(value))
+    return normalized
 
 
 def _default_service_cloud_id(service_name: str) -> str:
@@ -887,7 +915,7 @@ class AttendanceStore:
         if not started_at:
             return shift, 0
 
-        elapsed = int((_now() - datetime.fromisoformat(started_at)).total_seconds())
+        elapsed = int((_now() - parse_local_datetime(started_at)).total_seconds())
         updated_at = _iso()
         with self.connect() as connection:
             connection.execute(
@@ -1169,6 +1197,7 @@ class AttendanceStore:
         self._mark_attendance_cloud_error("attendance_events", event_id, error)
 
     def import_cloud_attendance_day(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         employee_username = str(item.get("employee_username", "")).strip()
         day_date = str(item.get("day_date", "")).strip()
@@ -1235,6 +1264,7 @@ class AttendanceStore:
         return True
 
     def import_cloud_attendance_shift(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         employee_username = str(item.get("employee_username", "")).strip()
         shift_date = str(item.get("shift_date", "")).strip()
@@ -1320,6 +1350,7 @@ class AttendanceStore:
         return True
 
     def import_cloud_attendance_day_event(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         day_cloud_id = str(item.get("day_cloud_id", "")).strip()
         employee_username = str(item.get("employee_username", "")).strip()
@@ -1395,6 +1426,7 @@ class AttendanceStore:
         return True
 
     def import_cloud_attendance_event(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         shift_cloud_id = str(item.get("shift_cloud_id", "")).strip()
         employee_username = str(item.get("employee_username", "")).strip()
@@ -1684,6 +1716,7 @@ class AttendanceStore:
             )
 
     def import_cloud_announcement(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         if not cloud_id:
             return False
@@ -1941,6 +1974,7 @@ class AttendanceStore:
             )
 
     def import_cloud_service_catalog_item(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         service_name = str(item.get("service_name", "")).strip()
         if not cloud_id or not service_name or service_name == "Other":
@@ -2172,6 +2206,7 @@ class AttendanceStore:
             )
 
     def import_cloud_inventory_item(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         if not cloud_id:
             return False
@@ -2306,6 +2341,7 @@ class AttendanceStore:
             )
 
     def import_cloud_service_message_template(self, item: dict) -> bool:
+        item = _normalize_cloud_timestamps(item)
         cloud_id = str(item.get("cloud_id", "")).strip()
         if not cloud_id:
             return False

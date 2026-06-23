@@ -43,12 +43,13 @@ from app.ui.widgets import (
     combo_box,
     field_label,
     make_button,
+    make_scrollable_region,
     set_button_enabled,
     status_pill,
     text_entry,
 )
 from app.excel_sales import ExcelSyncResult
-from app.utils import duration_label, money_label, now_label, today_label
+from app.utils import duration_label, money_label, now_label, parse_local_datetime, today_label
 
 
 def _amount_input_allowed(value: str) -> bool:
@@ -293,8 +294,9 @@ class DashboardPage(tk.Frame):
         self.clock_label = tk.Label(top, text="", bg="#eef6ff", fg=NAVY, font=(FONT_BOLD, 11), padx=14, pady=7)
         self.clock_label.grid(row=0, column=2, rowspan=2, sticky="e")
 
-        self.content = tk.Frame(shell, bg=BG, padx=18, pady=18)
-        self.content.grid(row=1, column=0, sticky="nsew")
+        content_container, self.content = make_scrollable_region(shell, bg=BG)
+        content_container.grid(row=1, column=0, sticky="nsew")
+        self.content.configure(padx=18, pady=18)
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
         self.notification_dropdown = NotificationDropdown(shell, self)
@@ -1420,7 +1422,7 @@ class DashboardPage(tk.Frame):
         if not value:
             return "-"
         try:
-            return datetime.fromisoformat(value).strftime("%d %b, %I:%M %p")
+            return parse_local_datetime(value).strftime("%d %b, %I:%M %p")
         except ValueError:
             return value
 
@@ -1772,7 +1774,7 @@ class DashboardPage(tk.Frame):
         self.current_day_id = int(active_day["id"]) if active_day else None
         self.current_day_date = active_day["day_date"] if active_day else ""
         self.day_active = active_day is not None
-        self.day_started_at = datetime.fromisoformat(active_day["started_at"]) if active_day else None
+        self.day_started_at = parse_local_datetime(active_day["started_at"]) if active_day else None
 
         active = self.app.attendance_store.get_active_shift(self._employee_username())
         self.current_shift_id = int(active["id"]) if active else None
@@ -1780,21 +1782,21 @@ class DashboardPage(tk.Frame):
         self.checked_in = active is not None
         self.on_break = bool(active and active["current_break_started_at"])
         self.total_break_seconds = int(active["total_break_seconds"]) if active else 0
-        self.shift_started_at = datetime.fromisoformat(active["started_at"]) if active else None
+        self.shift_started_at = parse_local_datetime(active["started_at"]) if active else None
         if active and active["current_break_started_at"]:
-            self.break_started_at = datetime.fromisoformat(active["current_break_started_at"])
+            self.break_started_at = parse_local_datetime(active["current_break_started_at"])
         else:
             self.break_started_at = None
 
     def _format_event_time(self, value: str) -> str:
         try:
-            return datetime.fromisoformat(value).strftime("%I:%M %p")
+            return parse_local_datetime(value).strftime("%I:%M %p")
         except ValueError:
             return value
 
     def _format_template_time(self, value: str) -> str:
         try:
-            return datetime.fromisoformat(value).strftime("%d %b %Y, %I:%M %p")
+            return parse_local_datetime(value).strftime("%d %b %Y, %I:%M %p")
         except ValueError:
             return value
 
@@ -1932,46 +1934,51 @@ class DashboardPage(tk.Frame):
         self._clock_after_id = self.after(1000, self._tick_clock)
 
     def _refresh_stats(self) -> None:
-        if self.on_break:
-            shift_status = "On break"
-            accent = WARNING
-            pill_bg = "#fff5e6"
-        elif self.checked_in:
-            shift_status = "Checked in"
-            accent = SUCCESS
-            pill_bg = "#eafaf4"
-        elif self.day_active:
-            shift_status = "Day started"
-            accent = BLUE
-            pill_bg = "#eef6ff"
-        else:
-            shift_status = "Not checked in"
-            accent = MUTED
-            pill_bg = "#eaf2ff"
+        try:
+            if self.on_break:
+                shift_status = "On break"
+                accent = WARNING
+                pill_bg = "#fff5e6"
+            elif self.checked_in:
+                shift_status = "Checked in"
+                accent = SUCCESS
+                pill_bg = "#eafaf4"
+            elif self.day_active:
+                shift_status = "Day started"
+                accent = BLUE
+                pill_bg = "#eef6ff"
+            else:
+                shift_status = "Not checked in"
+                accent = MUTED
+                pill_bg = "#eaf2ff"
 
-        self.shift_pill.configure(text=shift_status, fg=accent if accent != MUTED else BLUE_DARK, bg=pill_bg)
-        self.status_card.value_label.configure(text=shift_status, fg=accent)
-        self.status_card.helper_label.configure(text=self._shift_label() if self.checked_in else self._day_label())
-        today_entries = self._sales_entries_for_date(self._sales_date())
-        self.entries_card.value_label.configure(text=str(len(today_entries)))
-        self.break_card.value_label.configure(text=duration_label(self.current_break_seconds()))
+            self.shift_pill.configure(text=shift_status, fg=accent if accent != MUTED else BLUE_DARK, bg=pill_bg)
+            self.status_card.value_label.configure(text=shift_status, fg=accent)
+            self.status_card.helper_label.configure(text=self._shift_label() if self.checked_in else self._day_label())
+            today_entries = self._sales_entries_for_date(self._sales_date())
+            self.entries_card.value_label.configure(text=str(len(today_entries)))
+            self.break_card.value_label.configure(text=duration_label(self.current_break_seconds()))
 
-        self.attendance_status.configure(text=shift_status, fg=accent)
-        if self.shift_started_at:
-            self.shift_time_label.configure(text=f"{self._shift_label()} started: {self.shift_started_at.strftime('%I:%M %p')}")
-        else:
-            self.shift_time_label.configure(text="Shift started: -")
-        self.break_time_label.configure(text=f"Break time: {duration_label(self.current_break_seconds())}")
-        self.attendance_date_label.configure(text=today_label())
+            self.attendance_status.configure(text=shift_status, fg=accent)
+            if self.shift_started_at:
+                self.shift_time_label.configure(text=f"{self._shift_label()} started: {self.shift_started_at.strftime('%I:%M %p')}")
+            else:
+                self.shift_time_label.configure(text="Shift started: -")
+            self.break_time_label.configure(text=f"Break time: {duration_label(self.current_break_seconds())}")
+            self.attendance_date_label.configure(text=today_label())
 
-        self.sales_today_count.configure(text=self._entry_count_text(len(today_entries)))
-        self._refresh_sales_sidebar(today_entries)
-        self.today_summary_label.configure(
-            text=f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} visible for 5 days"
-        )
-        self._refresh_sales_day_cards()
-        self._refresh_selected_sales_day_header()
-        self._apply_access_state()
+            self.sales_today_count.configure(text=self._entry_count_text(len(today_entries)))
+            self._refresh_sales_sidebar(today_entries)
+            self.today_summary_label.configure(
+                text=f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} visible for 5 days"
+            )
+            self._refresh_sales_day_cards()
+            self._refresh_selected_sales_day_header()
+        finally:
+            # Button enable/disable must always run, even if a display computation
+            # above raises - otherwise every attendance button freezes in whatever
+            # state it was in before the action that triggered this refresh.
+            self._apply_access_state()
 
     def _sales_entry_sync_state(self, entry: dict[str, str]) -> tuple[str, str]:
         if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:

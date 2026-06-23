@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.config import ADMIN_PASSWORD, ADMIN_USERNAME, DEFAULT_PASSWORD, DEFAULT_USERNAME, RESET_CODE
+from app.utils import normalize_local_timestamp
 
 
 HASH_ITERATIONS = 260_000
@@ -487,7 +488,7 @@ class AuthStore:
         if not key:
             return False
         existing = self.data.get("users", {}).get(key)
-        updated_at = str(item.get("updated_at") or _now())
+        updated_at = normalize_local_timestamp(str(item.get("updated_at") or _now()))
         if existing is not None:
             local_updated = str(existing.get("updated_at", ""))
             if local_updated >= updated_at and not existing.get("cloud_sync_error"):
@@ -502,9 +503,9 @@ class AuthStore:
                 "is_active": False,
                 "is_deleted": True,
                 "password_hash": "",
-                "created_at": str(item.get("created_at") or (existing or {}).get("created_at") or updated_at),
+                "created_at": normalize_local_timestamp(str(item.get("created_at") or (existing or {}).get("created_at") or updated_at)),
                 "updated_at": updated_at,
-                "deleted_at": str(item.get("deleted_at") or updated_at),
+                "deleted_at": normalize_local_timestamp(str(item.get("deleted_at") or updated_at)),
                 "cloud_synced_at": now,
                 "cloud_sync_error": "",
             }
@@ -519,7 +520,7 @@ class AuthStore:
                 "is_active": _as_bool(item.get("is_active", True), True),
                 "is_deleted": False,
                 "password_hash": password_hash,
-                "created_at": str(item.get("created_at") or (existing or {}).get("created_at") or updated_at),
+                "created_at": normalize_local_timestamp(str(item.get("created_at") or (existing or {}).get("created_at") or updated_at)),
                 "updated_at": updated_at,
                 "deleted_at": "",
                 "cloud_synced_at": now,

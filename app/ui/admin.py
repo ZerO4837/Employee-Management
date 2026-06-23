@@ -29,8 +29,16 @@ from app.config import (
     WHITE,
 )
 from app.excel_sales import ExcelSyncResult
-from app.ui.widgets import MetricCard, SurfaceCard, make_button, set_button_enabled, show_app_alert, status_pill
-from app.utils import duration_label, money_label, today_label
+from app.ui.widgets import (
+    MetricCard,
+    SurfaceCard,
+    fill_with_scrollable_region,
+    make_button,
+    set_button_enabled,
+    show_app_alert,
+    status_pill,
+)
+from app.utils import duration_label, money_label, parse_local_datetime, today_label
 
 
 class AdminPage(tk.Frame):
@@ -138,17 +146,17 @@ class AdminPage(tk.Frame):
         self.notebook.add(sales_data_tab, text="Sales Data")
         self.notebook.add(workbook_tab, text="Sales Workbook")
 
-        self._build_dashboard_tab(dashboard_tab)
-        self._build_employees_tab(employees_tab)
-        self._build_security_tab(security_tab)
-        self._build_attendance_tab(attendance_tab)
-        self._build_announcements_tab(announcements_tab)
-        self._build_message_templates_tab(messages_tab)
-        self._build_inventory_tab(inventory_tab)
-        self._build_service_catalog_tab(service_catalog_tab)
-        self._build_cloud_sync_tab(cloud_tab)
-        self._build_sales_data_tab(sales_data_tab)
-        self._build_sales_workbook_tab(workbook_tab)
+        self._build_dashboard_tab(fill_with_scrollable_region(dashboard_tab, bg=BG))
+        self._build_employees_tab(fill_with_scrollable_region(employees_tab, bg=BG))
+        self._build_security_tab(fill_with_scrollable_region(security_tab, bg=BG))
+        self._build_attendance_tab(fill_with_scrollable_region(attendance_tab, bg=BG))
+        self._build_announcements_tab(fill_with_scrollable_region(announcements_tab, bg=BG))
+        self._build_message_templates_tab(fill_with_scrollable_region(messages_tab, bg=BG))
+        self._build_inventory_tab(fill_with_scrollable_region(inventory_tab, bg=BG))
+        self._build_service_catalog_tab(fill_with_scrollable_region(service_catalog_tab, bg=BG))
+        self._build_cloud_sync_tab(fill_with_scrollable_region(cloud_tab, bg=BG))
+        self._build_sales_data_tab(fill_with_scrollable_region(sales_data_tab, bg=BG))
+        self._build_sales_workbook_tab(fill_with_scrollable_region(workbook_tab, bg=BG))
 
     def _build_header(self) -> None:
         header = SurfaceCard(self, padx=22, pady=18, accent=True, accent_start=NAVY, accent_end=BLUE)
@@ -2799,7 +2807,7 @@ class AdminPage(tk.Frame):
         if not value:
             return "-"
         try:
-            return datetime.fromisoformat(value).strftime("%I:%M %p")
+            return parse_local_datetime(value).strftime("%I:%M %p")
         except ValueError:
             return value
 
@@ -2815,7 +2823,7 @@ class AdminPage(tk.Frame):
         if not value:
             return "-"
         try:
-            return datetime.fromisoformat(value).strftime("%d %b, %I:%M %p")
+            return parse_local_datetime(value).strftime("%d %b, %I:%M %p")
         except ValueError:
             return value
 
@@ -2823,8 +2831,8 @@ class AdminPage(tk.Frame):
         total = int(shift["total_break_seconds"])
         if shift["current_break_started_at"]:
             try:
-                total += int((datetime.now() - datetime.fromisoformat(shift["current_break_started_at"])).total_seconds())
-            except ValueError:
+                total += int((datetime.now() - parse_local_datetime(shift["current_break_started_at"])).total_seconds())
+            except (ValueError, TypeError):
                 pass
         return max(total, 0)
 

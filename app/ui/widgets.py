@@ -428,3 +428,67 @@ def configure_treeview(style: ttk.Style) -> None:
         background=[("selected", WHITE), ("active", "#eef6ff")],
         foreground=[("selected", TEXT), ("active", BLUE_DARK)],
     )
+
+
+def bind_mousewheel_scroll(canvas: tk.Canvas) -> None:
+    """Scroll `canvas` with the mouse wheel, but only while the pointer is over it."""
+
+    def _on_mousewheel(event: tk.Event) -> None:
+        delta = event.delta
+        steps = -1 * (delta // 120) if abs(delta) >= 120 else -1 * delta
+        canvas.yview_scroll(int(steps), "units")
+
+    def _on_mousewheel_linux(event: tk.Event) -> None:
+        canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+
+    def _bind(_event: tk.Event | None = None) -> None:
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+        canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+
+    def _unbind(_event: tk.Event | None = None) -> None:
+        canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
+
+    canvas.bind("<Enter>", _bind)
+    canvas.bind("<Leave>", _unbind)
+
+
+def make_scrollable_region(parent: tk.Misc, bg: str = BG) -> tuple[tk.Frame, tk.Frame]:
+    """Build a vertically scrollable area inside `parent`.
+
+    Returns `(container, body)`. Place `container` with pack/grid as needed,
+    then build content into `body` exactly as if it were a plain frame.
+    """
+    container = tk.Frame(parent, bg=bg)
+    container.grid_columnconfigure(0, weight=1)
+    container.grid_rowconfigure(0, weight=1)
+
+    canvas = tk.Canvas(container, bg=bg, highlightthickness=0, bd=0)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    body = tk.Frame(canvas, bg=bg)
+    window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+    def _sync_scrollregion(_event: tk.Event | None = None) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _sync_width(event: tk.Event) -> None:
+        canvas.itemconfigure(window_id, width=event.width)
+
+    body.bind("<Configure>", _sync_scrollregion)
+    canvas.bind("<Configure>", _sync_width)
+    bind_mousewheel_scroll(canvas)
+
+    return container, body
+
+
+def fill_with_scrollable_region(parent: tk.Misc, bg: str = BG) -> tk.Frame:
+    """Convenience wrapper for `make_scrollable_region` that fills the whole `parent`."""
+    container, body = make_scrollable_region(parent, bg=bg)
+    container.pack(fill="both", expand=True)
+    return body
