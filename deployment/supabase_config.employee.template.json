@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "url": "https://YOUR-PROJECT.supabase.co",
+  "anon_key": "YOUR_PUBLISHABLE_OR_ANON_PUBLIC_KEY",
+  "admin_secret": "",
+  "employee_sync_secret": "YOUR_EMPLOYEE_SYNC_SECRET"
+}

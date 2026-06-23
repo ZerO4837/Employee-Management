@@ -268,10 +268,24 @@ The project is ready to package later with a tool such as PyInstaller. The app n
 - Updates should replace only application files. Do not delete or overwrite `%LOCALAPPDATA%\Digital Service Pakistan\Employee Management`, otherwise employee records and offline cache will be reset.
 - The built-in zip updater also skips SQLite/database files, `supabase_config.json`, and workbook files if they appear in an update package by mistake.
 
-Example PyInstaller shape for later:
+Build the release installer with:
 
 ```powershell
-pyinstaller --noconsole --name "Digital Service Pakistan Employee" --icon "assets/app_icon.ico" --add-data "assets;assets" main.py
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+```
+
+The output installer is written to:
+
+```text
+dist\installer\DigitalServicePakistanEmployeeSetup-<version>.exe
+```
+
+Upload that installer as the GitHub release asset. Do not upload the local `data/` folder, filled Supabase config files, real secrets, or Excel workbooks.
+
+For public GitHub releases, do not embed the employee sync secret in the installer. Configure trusted employee PCs privately after installation by writing `%LOCALAPPDATA%\Digital Service Pakistan\Employee Management\supabase_config.json`, or run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deployment\write_employee_cloud_config.ps1 -ProjectUrl "https://YOUR-PROJECT.supabase.co" -AnonKey "YOUR_PUBLISHABLE_KEY" -EmployeeSyncSecret "YOUR_EMPLOYEE_SYNC_SECRET"
 ```
 
 ## Supabase Cloud Sync

@@ -21,3 +21,8 @@ build/
 dist/
 *.spec
 update_error.log
+# Private deployment config files
+/deployment/supabase_config.employee.json
+/deployment/supabase_config.admin.json
+/deployment/*secret*
+/deployment/*private*
