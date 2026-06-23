@@ -108,6 +108,25 @@ class AuthStore:
         except OSError:
             pass
 
+    def _remove_bootstrap_secret(self, label: str) -> None:
+        bootstrap_path = self.path.parent / BOOTSTRAP_FILENAME
+        try:
+            lines = bootstrap_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        prefix = f"{label}: "
+        kept_lines = [line for line in lines if not line.startswith(prefix)]
+        try:
+            if kept_lines:
+                bootstrap_path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+            else:
+                bootstrap_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def has_bootstrap_secret(self, label: str) -> bool:
+        return bool(self._read_bootstrap_secret(label))
+
     def _default_data(self) -> dict:
         employee_password, _ = self._bootstrap_password(DEFAULT_PASSWORD, "Employee password")
         admin_password, _ = self._bootstrap_password(ADMIN_PASSWORD, "Admin password")
@@ -389,6 +408,26 @@ class AuthStore:
         user["cloud_sync_error"] = ""
         self.save()
         return True, "Password reset.", password
+
+    def change_own_password(self, username: str, current_password: str, new_password: str) -> tuple[bool, str]:
+        user = self.data["users"].get(_user_key(username))
+        if user is None or user.get("is_deleted", False):
+            return False, "User could not be found."
+        if not user.get("is_active", True):
+            return False, "This account is not active."
+        if not verify_password(current_password, user.get("password_hash", "")):
+            return False, "Current password is incorrect."
+        if len(new_password) < 8:
+            return False, "New password must be at least 8 characters."
+        user["password_hash"] = hash_password(new_password)
+        user["updated_at"] = _now()
+        if user.get("role") != "admin":
+            user["cloud_synced_at"] = ""
+            user["cloud_sync_error"] = ""
+        self.save()
+        if user.get("role") == "admin":
+            self._remove_bootstrap_secret("Admin password")
+        return True, "Password updated."
 
     def delete_user(self, username: str) -> tuple[bool, str]:
         key = _user_key(username)

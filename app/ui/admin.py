@@ -43,6 +43,9 @@ class AdminPage(tk.Frame):
         self.employee_name_var = tk.StringVar()
         self.employee_username_var = tk.StringVar()
         self.employee_password_var = tk.StringVar()
+        self.admin_current_password_var = tk.StringVar()
+        self.admin_new_password_var = tk.StringVar()
+        self.admin_confirm_password_var = tk.StringVar()
         self.employee_active_var = tk.BooleanVar(value=True)
         self.selected_employee_username: str | None = None
         self.employee_active_status_label: tk.Label | None = None
@@ -52,6 +55,7 @@ class AdminPage(tk.Frame):
         self.employee_count_label: tk.Label | None = None
         self.employee_name_entry: tk.Entry | None = None
         self.employee_save_button: tk.Button | None = None
+        self.admin_password_status_label: tk.Label | None = None
         self.template_service_var = tk.StringVar(value="Capcut Private Monthly")
         self.template_other_service_var = tk.StringVar()
         self.template_other_service_widgets: list[tk.Widget] = []
@@ -113,6 +117,7 @@ class AdminPage(tk.Frame):
 
         dashboard_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         employees_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        security_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         attendance_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         announcements_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         messages_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
@@ -123,6 +128,7 @@ class AdminPage(tk.Frame):
         workbook_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         self.notebook.add(dashboard_tab, text="Dashboard")
         self.notebook.add(employees_tab, text="Registered Employees")
+        self.notebook.add(security_tab, text="Admin Security")
         self.notebook.add(attendance_tab, text="Attendance")
         self.notebook.add(announcements_tab, text="Announcements")
         self.notebook.add(messages_tab, text="Service Messages")
@@ -134,6 +140,7 @@ class AdminPage(tk.Frame):
 
         self._build_dashboard_tab(dashboard_tab)
         self._build_employees_tab(employees_tab)
+        self._build_security_tab(security_tab)
         self._build_attendance_tab(attendance_tab)
         self._build_announcements_tab(announcements_tab)
         self._build_message_templates_tab(messages_tab)
@@ -395,6 +402,111 @@ class AdminPage(tk.Frame):
         )
         entry.grid(row=row + 1, column=0, sticky="ew", ipady=8, pady=(8, 14))
         return entry
+
+    def _password_entry(self, parent: tk.Misc, label: str, variable: tk.StringVar, row: int) -> tk.Entry:
+        tk.Label(parent, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=row, column=0, sticky="w")
+        entry = tk.Entry(
+            parent,
+            textvariable=variable,
+            show="*",
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        )
+        entry.grid(row=row + 1, column=0, sticky="ew", ipady=8, pady=(8, 14))
+        return entry
+
+    def _build_security_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        card = SurfaceCard(parent, padx=24, pady=22, accent=True, accent_start=NAVY, accent_end=BLUE)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        body = card.body
+        body.grid_columnconfigure(0, weight=1)
+
+        tk.Label(body, text="Admin Password", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w"
+        )
+        tk.Label(
+            body,
+            text="Change the owner/admin login password for this device. Use your current admin password first.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=440,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 18))
+
+        self._password_entry(body, "Current Admin Password", self.admin_current_password_var, 2)
+        self._password_entry(body, "New Admin Password", self.admin_new_password_var, 4)
+        self._password_entry(body, "Confirm New Password", self.admin_confirm_password_var, 6)
+
+        self.admin_password_status_label = tk.Label(
+            body,
+            text="After changing it, the generated bootstrap admin password will no longer be used.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 10),
+            wraplength=440,
+            justify="left",
+        )
+        self.admin_password_status_label.grid(row=8, column=0, sticky="w", pady=(0, 14))
+        make_button(body, "Update Admin Password", self.change_admin_password, "primary").grid(
+            row=9, column=0, sticky="ew"
+        )
+
+        info = SurfaceCard(parent, padx=24, pady=22, accent=True, accent_start=SUCCESS, accent_end=TEAL)
+        info.grid(row=0, column=1, sticky="nsew")
+        info_body = info.body
+        info_body.grid_columnconfigure(0, weight=1)
+        tk.Label(info_body, text="Employee Passwords", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, sticky="w"
+        )
+        tk.Label(
+            info_body,
+            text=(
+                "Employee logins are managed from Registered Employees. Select an employee there to set, reset, "
+                "freeze, edit, or remove the employee account."
+            ),
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 11),
+            wraplength=440,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 18))
+        status_pill(info_body, "Employee passwords stay protected", fg=SUCCESS, bg="#eafaf4").grid(
+            row=2, column=0, sticky="w"
+        )
+
+    def change_admin_password(self) -> None:
+        current_password = self.admin_current_password_var.get()
+        new_password = self.admin_new_password_var.get()
+        confirm_password = self.admin_confirm_password_var.get()
+        if not current_password or not new_password or not confirm_password:
+            show_app_alert(self, "Missing password", "Fill current password, new password, and confirmation.", "warning")
+            return
+        if new_password != confirm_password:
+            show_app_alert(self, "Password mismatch", "New password and confirmation do not match.", "warning")
+            return
+        ok, message = self.app.auth.change_own_password(self.app.current_user, current_password, new_password)
+        if not ok:
+            show_app_alert(self, "Password not changed", message, "warning")
+            return
+        self.admin_current_password_var.set("")
+        self.admin_new_password_var.set("")
+        self.admin_confirm_password_var.set("")
+        if self.admin_password_status_label is not None:
+            self.admin_password_status_label.configure(
+                text="Admin password updated. Use the new password next time you log in.",
+                fg=SUCCESS,
+            )
+        show_app_alert(self, "Admin password updated", "Use the new password next time you log in.", "success")
 
     def _build_attendance_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)

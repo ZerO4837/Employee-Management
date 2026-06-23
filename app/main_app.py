@@ -145,7 +145,7 @@ class EmployeeApp(tk.Tk):
                 )
             else:
                 bootstrap_path = AUTH_CONFIG_PATH.parent / BOOTSTRAP_FILENAME
-                if username.strip().casefold() == ADMIN_USERNAME.casefold() and bootstrap_path.exists():
+                if username.strip().casefold() == ADMIN_USERNAME.casefold() and self.auth.has_bootstrap_secret("Admin password"):
                     login_page.show_login_error(
                         "Admin password is saved in the private bootstrap file on this PC. "
                         f"Open this file and use the Admin password:\n{bootstrap_path}"
