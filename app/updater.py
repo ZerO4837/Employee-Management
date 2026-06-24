@@ -126,7 +126,7 @@ def check_for_update() -> UpdateInfo:
     )
 
 
-def start_update_and_relaunch(update_info: UpdateInfo, repo_root: Path = BASE_DIR) -> tuple[bool, str]:
+def start_update(update_info: UpdateInfo, repo_root: Path = BASE_DIR) -> tuple[bool, str]:
     if update_info.asset is None:
         return False, update_info.message or "No downloadable update asset was found."
 
@@ -136,10 +136,8 @@ def start_update_and_relaunch(update_info: UpdateInfo, repo_root: Path = BASE_DI
         # instead of just launching another copy of the app (which is what
         # silently happened before: the app appeared to "restart" while no
         # update logic ever ran).
-        relaunch = [sys.executable]
         updater_prefix = [sys.executable, "--run-update-runner"]
     else:
-        relaunch = [sys.executable, str(repo_root / "main.py")]
         updater_prefix = [sys.executable, "-m", "app.update_runner"]
 
     command = [
@@ -152,8 +150,6 @@ def start_update_and_relaunch(update_info: UpdateInfo, repo_root: Path = BASE_DI
         update_info.asset.download_url,
         "--asset-name",
         update_info.asset.name,
-        "--relaunch",
-        *relaunch,
     ]
     creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     subprocess.Popen(
@@ -165,4 +161,4 @@ def start_update_and_relaunch(update_info: UpdateInfo, repo_root: Path = BASE_DI
         startupinfo=_startupinfo(),
         creationflags=creationflags,
     )
-    return True, "Updater started."
+    return True, "Updater started. The app will close now; reopen it manually once you see the update-complete message."

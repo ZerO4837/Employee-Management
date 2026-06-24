@@ -99,10 +99,24 @@ def _ignore_update_names(_directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _open_zip_with_retry(asset_path: Path) -> zipfile.ZipFile:
+    # Same antivirus-scan-lock issue as _run_installer can hit a freshly
+    # downloaded zip too - retry opening it instead of failing immediately.
+    last_error: OSError | None = None
+    for attempt in range(6):
+        if attempt:
+            time.sleep(1.5)
+        try:
+            return zipfile.ZipFile(asset_path)
+        except OSError as exc:
+            last_error = exc
+    raise last_error
+
+
 def _install_zip(asset_path: Path, app_dir: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="dsp_update_extract_") as temp_extract:
         extract_dir = Path(temp_extract)
-        with zipfile.ZipFile(asset_path) as archive:
+        with _open_zip_with_retry(asset_path) as archive:
             archive.extractall(extract_dir)
         payload_root = _zip_payload_root(extract_dir)
         shutil.copytree(payload_root, app_dir, dirs_exist_ok=True, ignore=_ignore_update_names)
@@ -116,8 +130,22 @@ def _run_installer(asset_path: Path) -> int:
         # Without these, the Inno Setup wizard opens and waits for clicks
         # instead of updating automatically - the whole point of this flow.
         command = [str(asset_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
-    result = subprocess.run(command, startupinfo=_startupinfo(), check=False)
-    return int(result.returncode)
+
+    # A freshly downloaded .exe is a common target for antivirus/Windows
+    # Defender real-time scanning, which briefly locks the file and makes
+    # launching it fail with "[WinError 5] Access is denied" even though
+    # nothing is actually wrong with the file. Retrying after a short wait
+    # rides out that lock instead of failing the whole update over it.
+    last_error: OSError | None = None
+    for attempt in range(6):
+        if attempt:
+            time.sleep(1.5)
+        try:
+            result = subprocess.run(command, startupinfo=_startupinfo(), check=False)
+            return int(result.returncode)
+        except OSError as exc:
+            last_error = exc
+    raise last_error
 
 
 def _write_error(app_dir: Path, message: str) -> None:
@@ -127,17 +155,16 @@ def _write_error(app_dir: Path, message: str) -> None:
         pass
 
 
-def _relaunch(command: list[str], cwd: Path) -> None:
-    creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    subprocess.Popen(
-        command,
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        startupinfo=_startupinfo(),
-        creationflags=creationflags,
-    )
+def _notify(title: str, message: str, is_error: bool = False) -> None:
+    # A plain Win32 message box, not the Tkinter app - this process has no
+    # GUI of its own and should not import/start one just to report status.
+    if os.name != "nt":
+        return
+    icon = 0x10 if is_error else 0x40  # MB_ICONERROR vs MB_ICONINFORMATION
+    try:
+        ctypes.windll.user32.MessageBoxW(0, message, title, icon)
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,7 +173,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--asset-url", required=True)
     parser.add_argument("--asset-name", required=True)
-    parser.add_argument("--relaunch", nargs="+", required=True)
     args = parser.parse_args(argv)
 
     app_dir = Path(args.app_dir)
@@ -166,8 +192,24 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         exit_code = 1
         _write_error(app_dir, f"Update failed:\n{exc}")
-    finally:
-        _relaunch(args.relaunch, app_dir)
+
+    if exit_code == 0:
+        try:
+            (app_dir / "update_error.log").unlink(missing_ok=True)
+        except OSError:
+            pass
+        _notify(
+            "Update complete",
+            "Digital Service Pakistan Employee has been updated. Open it again to use the new version.",
+        )
+    else:
+        _notify(
+            "Update failed",
+            "The update could not be completed. The app was not changed - "
+            "you can keep using it, or try updating again later.\n\n"
+            f"Details were saved to: {app_dir / 'update_error.log'}",
+            is_error=True,
+        )
     return exit_code
 
 

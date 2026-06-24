@@ -30,7 +30,7 @@ from app.config import (
 )
 from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
-from app.updater import UpdateInfo, check_for_update, start_update_and_relaunch
+from app.updater import UpdateInfo, check_for_update, start_update
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
@@ -388,13 +388,14 @@ class EmployeeApp(tk.Tk):
                 "A new app update is available.\n\n"
                 f"Current: {update_info.current_version}\n"
                 f"Latest: {update_info.latest_version}\n\n"
-                "Update now? The app will close, update, and reopen automatically."
+                "Update now? The app will close to install it. A message will tell you when it's "
+                "done - reopen the app yourself afterward."
             ),
             parent=self,
         )
         if not should_update:
             return
-        started, message = start_update_and_relaunch(update_info)
+        started, message = start_update(update_info)
         if not started:
             messagebox.showwarning("Update could not start", message, parent=self)
             return
