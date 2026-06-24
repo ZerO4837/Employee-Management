@@ -292,6 +292,12 @@ class EmployeeApp(tk.Tk):
             return
         page = self.pages.get(getattr(self, "current_page", ""))
         if result.changed:
+            # A pulled setting (e.g. the sales workbook target) only takes
+            # effect once self.sales_workbook is rebuilt from the latest
+            # value - without this, an employee install that just received
+            # the admin's configured target keeps writing to its old one
+            # until the app is restarted.
+            self.load_sales_workbook_settings()
             if isinstance(page, DashboardPage):
                 page._refresh_notification_badge()
                 page._refresh_service_catalog_values()
@@ -310,6 +316,8 @@ class EmployeeApp(tk.Tk):
                 page._refresh_service_catalog()
                 page._refresh_message_templates()
                 page._refresh_inventory_items()
+                page._refresh_sales_data()
+                page._refresh_excel_settings()
             if self.current_role == "employee" and self.current_user:
                 current_profile = self.auth.get_user(self.current_user)
                 if current_profile is None or not current_profile.get("is_active", True):

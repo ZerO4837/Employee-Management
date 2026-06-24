@@ -122,21 +122,25 @@ class CloudSyncService:
                 pushed += self._push_attendance_shifts(client, config.user_sync_secret)
                 pushed += self._push_attendance_day_events(client, config.user_sync_secret)
                 pushed += self._push_attendance_events(client, config.user_sync_secret)
+                pushed += self._push_sales_entries(client, config.user_sync_secret)
             if push_local and config.can_push:
                 pushed += self._push_employee_users(client, config.admin_secret)
                 pushed += self._push_announcements(client, config.admin_secret)
                 pushed += self._push_service_catalog(client, config.admin_secret)
                 pushed += self._push_service_templates(client, config.admin_secret)
                 pushed += self._push_inventory_items(client, config.admin_secret)
+                pushed += self._push_app_settings(client, config.admin_secret)
             if pull_remote:
                 if config.can_pull_users:
                     pulled += self._pull_employee_users(client, config.user_sync_secret)
                     pulled += self._pull_inventory_items(client, config.user_sync_secret)
+                    pulled += self._pull_app_settings(client, config.user_sync_secret)
                 if config.can_push:
                     pulled += self._pull_attendance_days(client, config.admin_secret)
                     pulled += self._pull_attendance_shifts(client, config.admin_secret)
                     pulled += self._pull_attendance_day_events(client, config.admin_secret)
                     pulled += self._pull_attendance_events(client, config.admin_secret)
+                    pulled += self._pull_sales_entries(client, config.admin_secret)
                 pulled += self._pull_announcements(client)
                 pulled += self._pull_service_catalog(client)
                 pulled += self._pull_service_templates(client)
@@ -223,6 +227,22 @@ class CloudSyncService:
                 raise
         return pushed
 
+    def _push_app_settings(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_settings():
+            key = str(row["setting_key"])
+            try:
+                client.rpc(
+                    "dsp_upsert_app_setting",
+                    {"admin_secret": admin_secret, "row_data": self._app_setting_payload(row)},
+                )
+                self.store.mark_setting_cloud_sync(key)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_setting_cloud_error(key, str(exc))
+                raise
+        return pushed
+
     def _push_attendance_days(self, client: SupabaseRestClient, sync_secret: str) -> int:
         pushed = 0
         for row in self.store.list_cloud_pending_attendance_days(limit=200):
@@ -292,6 +312,24 @@ class CloudSyncService:
                 self.store.mark_attendance_event_cloud_error(local_id, str(exc))
                 raise
         return pushed
+
+    def _push_sales_entries(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        pushed = 0
+        for row in self.store.list_cloud_pending_sales_entries(limit=200):
+            local_id = int(row["id"])
+            row = self.store.ensure_sales_entry_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_sales_entry",
+                    {"sync_secret": sync_secret, "row_data": self._sales_entry_payload(row)},
+                )
+                self.store.mark_sales_entry_cloud_sync(local_id)
+                pushed += 1
+            except Exception as exc:
+                self.store.mark_sales_entry_cloud_error(local_id, str(exc))
+                raise
+        return pushed
+
     def _push_employee_users(self, client: SupabaseRestClient, admin_secret: str) -> int:
         if self.auth_store is None:
             return 0
@@ -361,6 +399,17 @@ class CloudSyncService:
             if isinstance(row, dict) and self.store.import_cloud_attendance_event(row):
                 changed += 1
         return changed
+
+    def _pull_sales_entries(self, client: SupabaseRestClient, admin_secret: str) -> int:
+        rows = client.rpc("dsp_list_sales_entries", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_sales_entry(row):
+                changed += 1
+        return changed
+
     def _pull_announcements(self, client: SupabaseRestClient) -> int:
         rows = client.select(
             "dsp_announcements",
@@ -413,6 +462,16 @@ class CloudSyncService:
         changed = 0
         for row in rows:
             if self.store.import_cloud_inventory_item(row):
+                changed += 1
+        return changed
+
+    def _pull_app_settings(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        rows = client.rpc("dsp_list_app_settings", {"sync_secret": sync_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_app_setting(row):
                 changed += 1
         return changed
 
@@ -489,6 +548,34 @@ class CloudSyncService:
             "created_at": row.get("created_at", ""),
             "updated_at": row.get("updated_at") or row.get("created_at", ""),
             "is_active": bool(row.get("is_active", 1)),
+        }
+
+    def _sales_entry_payload(self, row: dict) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "employee_username": row.get("employee_username", ""),
+            "entry_date": row.get("entry_date", ""),
+            "entry_time": row.get("entry_time", ""),
+            "customer": row.get("customer", ""),
+            "item": row.get("item", ""),
+            "order_id": row.get("order_id", ""),
+            "buying_amount": row.get("buying_amount", ""),
+            "selling_amount": row.get("selling_amount", ""),
+            "profit": row.get("profit", ""),
+            "status": row.get("status", ""),
+            "notes": row.get("notes", ""),
+            "excel_row": row.get("excel_row"),
+            "excel_synced_at": row.get("excel_synced_at", ""),
+            "excel_sync_error": row.get("excel_sync_error", ""),
+            "created_at": row.get("created_at", ""),
+            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+        }
+
+    def _app_setting_payload(self, row: dict) -> dict:
+        return {
+            "setting_key": row.get("setting_key", ""),
+            "setting_value": row.get("setting_value", ""),
+            "updated_at": row.get("updated_at", ""),
         }
 
     def _employee_user_payload(self, row: dict) -> dict:

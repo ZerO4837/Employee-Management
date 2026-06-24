@@ -254,7 +254,9 @@ For two different PCs to stay linked, the next step will be one shared sync laye
 
 ## Supabase Scope
 
-Supabase is currently used for registered employee accounts, attendance records, the Items Sold list, inventory credentials, admin-controlled announcements, and service message templates. Notes, sales entries, and Excel sync still use the local app database/OneDrive workflow unless you decide to move those online later.
+Supabase is currently used for registered employee accounts, attendance records, the Items Sold list, inventory credentials, admin-controlled announcements, service message templates, sold-item sales entries, and the sales workbook target setting (path/worksheet name). Employees only ever push their own sales entries up; only the admin secret can pull the full list back down, so the admin panel's Sales Data tab and dashboard reflect sales from every installed PC, not just the one the admin is sitting at. The sales workbook target works the same way: set it once from the admin panel and it propagates to every employee install automatically instead of needing to be configured machine-by-machine.
+
+Deleting a sales entry locally (for example, the automatic cleanup of an "account is full" blocked entry) does not delete its already-synced copy from Supabase or from other PCs that already pulled it - there is no delete-propagation for sales entries, only create/update. Notes still use only the local app database; Excel sync itself still writes directly from whichever PC created the entry, using each PC's own Excel/OneDrive access.
 
 Do not put the Supabase `service_role` key inside the desktop app, public repository, or packaged `.exe`.
 

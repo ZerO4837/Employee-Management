@@ -33,6 +33,12 @@ _CLOUD_TIMESTAMP_FIELDS = (
     "deleted_at",
 )
 
+# Explicit allowlist of app_settings keys that may sync through Supabase.
+# This must stay an allowlist, not a blocklist: app_settings also holds
+# secrets (the Supabase admin/employee sync secrets themselves) and per-device
+# preferences (remembered login username) that must never leave this PC.
+CLOUD_SYNCED_SETTING_KEYS = frozenset({"sales_workbook_path", "sales_worksheet_name"})
+
 
 def _normalize_cloud_timestamps(item: dict) -> dict:
     """Reformat any offset-aware timestamps from a synced Supabase row to naive local time.
@@ -435,6 +441,13 @@ class AttendanceStore:
                 ON sales_entries (employee_username, entry_date)
                 """
             )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_entries_cloud_id
+                ON sales_entries (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
 
     def _ensure_sales_schema(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -515,6 +528,15 @@ class AttendanceStore:
             "service_catalog": {
                 "cloud_id": "TEXT NOT NULL DEFAULT ''",
                 "created_by": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "app_settings": {
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+            },
+            "sales_entries": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
                 "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
                 "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
             },
@@ -616,16 +638,102 @@ class AttendanceStore:
     def set_setting(self, key: str, value: str) -> None:
         updated_at = _iso()
         with self.connect() as connection:
+            if key in CLOUD_SYNCED_SETTING_KEYS:
+                connection.execute(
+                    """
+                    INSERT INTO app_settings (setting_key, setting_value, updated_at, cloud_synced_at, cloud_sync_error)
+                    VALUES (?, ?, ?, '', '')
+                    ON CONFLICT(setting_key) DO UPDATE SET
+                        setting_value = excluded.setting_value,
+                        updated_at = excluded.updated_at,
+                        cloud_synced_at = '',
+                        cloud_sync_error = ''
+                    """,
+                    (key, value, updated_at),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(setting_key) DO UPDATE SET
+                        setting_value = excluded.setting_value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, updated_at),
+                )
+
+    def list_cloud_pending_settings(self, limit: int = 20) -> list[dict]:
+        keys = tuple(CLOUD_SYNCED_SETTING_KEYS)
+        placeholders = ", ".join("?" for _ in keys)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM app_settings
+                WHERE setting_key IN ({placeholders})
+                    AND (
+                        cloud_synced_at = ''
+                        OR cloud_synced_at < updated_at
+                        OR cloud_sync_error <> ''
+                    )
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (*keys, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_setting_cloud_sync(self, key: str) -> None:
+        with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO app_settings (setting_key, setting_value, updated_at)
-                VALUES (?, ?, ?)
+                UPDATE app_settings
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE setting_key = ?
+                """,
+                (_iso(), key),
+            )
+
+    def mark_setting_cloud_error(self, key: str, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE app_settings
+                SET cloud_sync_error = ?
+                WHERE setting_key = ?
+                """,
+                (error[:500], key),
+            )
+
+    def import_cloud_app_setting(self, item: dict) -> bool:
+        key = str(item.get("setting_key", "")).strip()
+        if key not in CLOUD_SYNCED_SETTING_KEYS:
+            return False
+        value = str(item.get("setting_value", ""))
+        updated_at = normalize_local_timestamp(str(item.get("updated_at") or _iso()))
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM app_settings WHERE setting_key = ?",
+                (key,),
+            ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+            connection.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value, updated_at, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, '')
                 ON CONFLICT(setting_key) DO UPDATE SET
                     setting_value = excluded.setting_value,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    cloud_synced_at = excluded.cloud_synced_at,
+                    cloud_sync_error = ''
                 """,
-                (key, value, updated_at),
+                (key, value, updated_at, _iso()),
             )
+        return True
 
     def get_employee_note(self, employee_username: str, note_type: str, note_date: str = "") -> dict:
         note_type = note_type.strip().lower()
@@ -2637,7 +2745,9 @@ class AttendanceStore:
                     previous_customer = ?,
                     previous_item = ?,
                     previous_order_id = ?,
-                    updated_at = ?
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ? AND employee_username = ?
                 """,
                 (
@@ -2679,7 +2789,9 @@ class AttendanceStore:
                     previous_customer = '',
                     previous_item = '',
                     previous_order_id = '',
-                    updated_at = ?
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ? AND employee_username = ?
                 """,
                 (excel_row, synced_at, synced_at, entry_id, employee_username),
@@ -2701,7 +2813,9 @@ class AttendanceStore:
                 UPDATE sales_entries
                 SET excel_sync_error = ?,
                     excel_synced_at = '',
-                    updated_at = ?
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
                 WHERE id = ? AND employee_username = ?
                 """,
                 (error[:500], updated_at, entry_id, employee_username),
@@ -2763,3 +2877,169 @@ class AttendanceStore:
                 "DELETE FROM sales_entries WHERE id = ? AND employee_username = ?",
                 (entry_id, employee_username),
             )
+
+    def list_cloud_pending_sales_entries(self, limit: int = 200) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM sales_entries
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
+
+    def ensure_sales_entry_cloud_id(self, entry_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM sales_entries WHERE id = ?", (entry_id,)).fetchone()
+            if row is None:
+                raise ValueError("Sales entry could not be found.")
+            if not row["cloud_id"]:
+                connection.execute(
+                    """
+                    UPDATE sales_entries
+                    SET cloud_id = ?,
+                        cloud_synced_at = '',
+                        cloud_sync_error = ''
+                    WHERE id = ?
+                    """,
+                    (uuid.uuid4().hex, entry_id),
+                )
+                row = connection.execute("SELECT * FROM sales_entries WHERE id = ?", (entry_id,)).fetchone()
+        item = _normalize_sales_row(row)
+        if item is None:
+            raise ValueError("Sales entry could not be found.")
+        return item
+
+    def mark_sales_entry_cloud_sync(self, entry_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET cloud_synced_at = ?,
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), entry_id),
+            )
+
+    def mark_sales_entry_cloud_error(self, entry_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sales_entries
+                SET cloud_sync_error = ?
+                WHERE id = ?
+                """,
+                (error[:500], entry_id),
+            )
+
+    def import_cloud_sales_entry(self, item: dict) -> bool:
+        cloud_id = str(item.get("cloud_id", "")).strip()
+        employee_username = str(item.get("employee_username", "")).strip()
+        entry_date = str(item.get("entry_date", "")).strip()
+        if not cloud_id or not employee_username or not entry_date:
+            return False
+        created_at = normalize_local_timestamp(str(item.get("created_at") or item.get("updated_at") or _iso()))
+        updated_at = normalize_local_timestamp(str(item.get("updated_at") or created_at))
+        excel_synced_at = normalize_local_timestamp(str(item.get("excel_synced_at") or ""))
+        buying_amount = str(item.get("buying_amount") or "0")
+        selling_amount = str(item.get("selling_amount") or "")
+        profit = str(item.get("profit") or "") or _profit_value(buying_amount, selling_amount)
+        excel_row = item.get("excel_row")
+        try:
+            excel_row = int(excel_row) if excel_row not in (None, "") else None
+        except (TypeError, ValueError):
+            excel_row = None
+
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM sales_entries WHERE cloud_id = ?",
+                (cloud_id,),
+            ).fetchone()
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or "")
+                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE sales_entries
+                    SET employee_username = ?,
+                        entry_date = ?,
+                        entry_time = ?,
+                        customer = ?,
+                        item = ?,
+                        order_id = ?,
+                        buying_amount = ?,
+                        selling_amount = ?,
+                        amount = ?,
+                        profit = ?,
+                        status = ?,
+                        notes = ?,
+                        excel_row = ?,
+                        excel_synced_at = ?,
+                        excel_sync_error = ?,
+                        updated_at = ?,
+                        cloud_synced_at = ?,
+                        cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    (
+                        employee_username,
+                        entry_date,
+                        str(item.get("entry_time", "")),
+                        str(item.get("customer", "")),
+                        str(item.get("item", "")),
+                        str(item.get("order_id", "")),
+                        buying_amount,
+                        selling_amount,
+                        selling_amount,
+                        profit,
+                        str(item.get("status", "")),
+                        str(item.get("notes", "")),
+                        excel_row,
+                        excel_synced_at,
+                        str(item.get("excel_sync_error", "")),
+                        updated_at,
+                        _iso(),
+                        cloud_id,
+                    ),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO sales_entries
+                (cloud_id, employee_username, entry_date, entry_time, customer, item, order_id,
+                 buying_amount, selling_amount, amount, profit, status, notes,
+                 excel_row, excel_synced_at, excel_sync_error, created_at, updated_at,
+                 cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    cloud_id,
+                    employee_username,
+                    entry_date,
+                    str(item.get("entry_time", "")),
+                    str(item.get("customer", "")),
+                    str(item.get("item", "")),
+                    str(item.get("order_id", "")),
+                    buying_amount,
+                    selling_amount,
+                    selling_amount,
+                    profit,
+                    str(item.get("status", "")),
+                    str(item.get("notes", "")),
+                    excel_row,
+                    excel_synced_at,
+                    str(item.get("excel_sync_error", "")),
+                    created_at,
+                    updated_at,
+                    _iso(),
+                ),
+            )
+        return True

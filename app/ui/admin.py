@@ -2308,6 +2308,24 @@ class AdminPage(tk.Frame):
         workbook = self.app.sales_workbook
         self.excel_path_var.set(workbook.display_path)
         self.excel_sheet_var.set(workbook.worksheet_name)
+
+        # The workbook target is a local setting per installation - a fresh
+        # install (or a packaged .exe, which uses a different data folder
+        # than running from source) starts with no target saved and silently
+        # falls back to a private local file. Flag that clearly instead of
+        # letting it look identical to a real configured target.
+        configured_path = self.app.attendance_store.get_setting("sales_workbook_path", "")
+        if not configured_path:
+            self.excel_status_label.configure(
+                text=(
+                    "Status: NOT CONFIGURED on this install.\n"
+                    f"Sales entries are being saved only to a private local file on this PC ({workbook.display_path}), "
+                    "not your shared workbook. Set the workbook above and click Save Target to fix this."
+                ),
+                fg=DANGER,
+            )
+            return
+
         if workbook.display_path.lower().startswith(("http://", "https://")):
             file_state = "cloud workbook URL"
         else:
@@ -2315,7 +2333,8 @@ class AdminPage(tk.Frame):
             file_state = "file found" if path.exists() else "file will be created"
         sheet_state = workbook.worksheet_name or "active sheet"
         self.excel_status_label.configure(
-            text=f"Workbook: {workbook.display_path}\nWorksheet: {sheet_state}\nStatus: {file_state}"
+            text=f"Workbook: {workbook.display_path}\nWorksheet: {sheet_state}\nStatus: {file_state}",
+            fg=TEXT,
         )
 
     def _refresh_announcements(self) -> None:

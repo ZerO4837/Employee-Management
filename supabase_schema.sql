@@ -799,4 +799,207 @@ grant execute on function public.dsp_list_attendance_shifts(text) to anon;
 grant execute on function public.dsp_list_attendance_day_events(text) to anon;
 grant execute on function public.dsp_list_attendance_events(text) to anon;
 grant execute on function public.dsp_upsert_announcement(text, jsonb) to anon;
+
+-- App settings sync (admin-controlled, machine-local settings such as the
+-- sales workbook target) so a value saved once on the admin PC reaches every
+-- installed employee app, instead of staying stuck in that one PC's local
+-- SQLite file.
+create table if not exists public.dsp_app_settings (
+  setting_key text primary key,
+  setting_value text not null default '',
+  updated_at timestamptz not null default now()
+);
+
+alter table public.dsp_app_settings enable row level security;
+revoke all on table public.dsp_app_settings from anon, authenticated;
+
+create or replace function public.dsp_upsert_app_setting(admin_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'setting_key', ''));
+  if key_value = '' then
+    raise exception 'Setting key is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_app_settings (setting_key, setting_value, updated_at)
+  values (
+    key_value,
+    coalesce(row_data->>'setting_value', ''),
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (setting_key) do update set
+    setting_value = excluded.setting_value,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_list_app_settings(sync_secret text)
+returns table (
+  setting_key text,
+  setting_value text,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select s.setting_key, s.setting_value, s.updated_at
+  from public.dsp_app_settings s;
+end;
+$$;
+
+-- Sales entries sync, so an employee's sold-item entries show up on the
+-- admin's Sales Data tab/dashboard from any PC, not only on whichever
+-- machine the employee used. Employees only ever push their own entries up
+-- (via the employee sync secret); only the admin secret can pull the full
+-- list back down, matching the attendance sync pattern. Contains customer
+-- name/phone/email, so this table is never directly readable by anon - only
+-- through these secret-gated functions.
+create table if not exists public.dsp_sales_entries (
+  cloud_id text primary key,
+  employee_username text not null default '',
+  entry_date date not null,
+  entry_time text not null default '',
+  customer text not null default '',
+  item text not null default '',
+  order_id text not null default '',
+  buying_amount text not null default '',
+  selling_amount text not null default '',
+  profit text not null default '',
+  status text not null default '',
+  notes text not null default '',
+  excel_row integer,
+  excel_synced_at text not null default '',
+  excel_sync_error text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists dsp_sales_entries_lookup_idx
+on public.dsp_sales_entries (employee_username, entry_date desc, updated_at desc);
+
+alter table public.dsp_sales_entries enable row level security;
+revoke all on table public.dsp_sales_entries from anon, authenticated;
+
+create or replace function public.dsp_upsert_sales_entry(sync_secret text, row_data jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  key_value text;
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  key_value := trim(coalesce(row_data->>'cloud_id', ''));
+  if key_value = '' then
+    raise exception 'Sales entry cloud_id is required' using errcode = '22023';
+  end if;
+
+  insert into public.dsp_sales_entries (
+    cloud_id, employee_username, entry_date, entry_time, customer, item, order_id,
+    buying_amount, selling_amount, profit, status, notes,
+    excel_row, excel_synced_at, excel_sync_error, created_at, updated_at
+  )
+  values (
+    key_value,
+    coalesce(row_data->>'employee_username', ''),
+    coalesce(nullif(row_data->>'entry_date', '')::date, now()::date),
+    coalesce(row_data->>'entry_time', ''),
+    coalesce(row_data->>'customer', ''),
+    coalesce(row_data->>'item', ''),
+    coalesce(row_data->>'order_id', ''),
+    coalesce(row_data->>'buying_amount', ''),
+    coalesce(row_data->>'selling_amount', ''),
+    coalesce(row_data->>'profit', ''),
+    coalesce(row_data->>'status', ''),
+    coalesce(row_data->>'notes', ''),
+    nullif(row_data->>'excel_row', '')::integer,
+    coalesce(row_data->>'excel_synced_at', ''),
+    coalesce(row_data->>'excel_sync_error', ''),
+    coalesce(nullif(row_data->>'created_at', '')::timestamptz, now()),
+    coalesce(nullif(row_data->>'updated_at', '')::timestamptz, now())
+  )
+  on conflict (cloud_id) do update set
+    employee_username = excluded.employee_username,
+    entry_date = excluded.entry_date,
+    entry_time = excluded.entry_time,
+    customer = excluded.customer,
+    item = excluded.item,
+    order_id = excluded.order_id,
+    buying_amount = excluded.buying_amount,
+    selling_amount = excluded.selling_amount,
+    profit = excluded.profit,
+    status = excluded.status,
+    notes = excluded.notes,
+    excel_row = excluded.excel_row,
+    excel_synced_at = excluded.excel_synced_at,
+    excel_sync_error = excluded.excel_sync_error,
+    created_at = excluded.created_at,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+create or replace function public.dsp_list_sales_entries(admin_secret text)
+returns table (
+  cloud_id text,
+  employee_username text,
+  entry_date date,
+  entry_time text,
+  customer text,
+  item text,
+  order_id text,
+  buying_amount text,
+  selling_amount text,
+  profit text,
+  status text,
+  notes text,
+  excel_row integer,
+  excel_synced_at text,
+  excel_sync_error text,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select s.cloud_id, s.employee_username, s.entry_date, s.entry_time, s.customer, s.item, s.order_id,
+         s.buying_amount, s.selling_amount, s.profit, s.status, s.notes,
+         s.excel_row, s.excel_synced_at, s.excel_sync_error, s.created_at, s.updated_at
+  from public.dsp_sales_entries s
+  order by s.entry_date desc, s.updated_at desc
+  limit 5000;
+end;
+$$;
+
+grant execute on function public.dsp_upsert_app_setting(text, jsonb) to anon;
+grant execute on function public.dsp_list_app_settings(text) to anon;
+grant execute on function public.dsp_upsert_sales_entry(text, jsonb) to anon;
+grant execute on function public.dsp_list_sales_entries(text) to anon;
 grant execute on function public.dsp_upsert_service_message_template(text, jsonb) to anon;
