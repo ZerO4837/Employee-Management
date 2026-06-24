@@ -179,6 +179,8 @@ class EmployeeApp(tk.Tk):
                 login_page.show_login_error(
                     "Your account is not active. Please contact the admin to reactivate your employee access."
                 )
+            elif username.strip() and self.auth.get_user(username) is None:
+                login_page.show_login_error("User not found. Please contact the admin.")
             else:
                 bootstrap_path = AUTH_CONFIG_PATH.parent / BOOTSTRAP_FILENAME
                 if username.strip().casefold() == ADMIN_USERNAME.casefold() and self.auth.has_bootstrap_secret("Admin password"):

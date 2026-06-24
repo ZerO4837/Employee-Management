@@ -1352,7 +1352,7 @@ class DashboardPage(tk.Frame):
                 tags=(tag,),
                 values=(
                     self._format_note_date(note_date),
-                    self._format_note_updated(note["updated_at"]),
+                    self._format_short_date(note["updated_at"]),
                     self._note_preview(note.get("content", "")),
                 ),
             )
@@ -1503,7 +1503,7 @@ class DashboardPage(tk.Frame):
                 "end",
                 iid=str(template_id),
                 tags=(tag,),
-                values=(template["service_name"], self._format_template_time(template["updated_at"])),
+                values=(template["service_name"], self._format_short_date(template["updated_at"])),
             )
 
         if self.selected_message_template_id in valid_ids:
@@ -1638,7 +1638,7 @@ class DashboardPage(tk.Frame):
                 values=(
                     item["service_name"],
                     item["account_email"],
-                    self._format_template_time(item["updated_at"]),
+                    self._format_short_date(item["updated_at"]),
                 ),
             )
 
@@ -1791,6 +1791,16 @@ class DashboardPage(tk.Frame):
     def _format_event_time(self, value: str) -> str:
         try:
             return parse_local_datetime(value).strftime("%I:%M %p")
+        except ValueError:
+            return value
+
+    def _format_short_date(self, value: str) -> str:
+        # Used only in narrow list-column contexts where the full
+        # "21 Jun 2026, 06:26 AM" format doesn't fit and gets clipped -
+        # date-only is enough for a quick-glance list; the full detail pane
+        # next to it still shows the complete date and time.
+        try:
+            return parse_local_datetime(value).strftime("%d %b %Y")
         except ValueError:
             return value
 

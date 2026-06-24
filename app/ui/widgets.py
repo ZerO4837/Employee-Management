@@ -155,7 +155,7 @@ class GradientBanner(tk.Canvas):
             font=(FONT_BOLD, 20),
             tags="detail",
         )
-        self.create_text(
+        subtitle_id = self.create_text(
             28,
             73,
             anchor="nw",
@@ -165,6 +165,17 @@ class GradientBanner(tk.Canvas):
             tags="detail",
             width=max(280, int(width * 0.56)),
         )
+        # The subtitle can wrap to a second line on a narrow window even
+        # though the fixed `height` passed at construction only budgeted for
+        # one - measure the actual wrapped text and grow the banner to fit
+        # instead of letting the second line clip and overlap whatever sits
+        # below it. Only grows, never shrinks, to avoid fighting the next
+        # <Configure> this triggers.
+        bounds = self.bbox(subtitle_id)
+        if bounds is not None:
+            needed_height = bounds[3] + 20
+            if needed_height > height + 2:
+                self.configure(height=needed_height)
 
 
 class SurfaceCard(tk.Frame):

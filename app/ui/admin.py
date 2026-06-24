@@ -2381,7 +2381,7 @@ class AdminPage(tk.Frame):
                 tags=(tag,),
                 values=(
                     template["service_name"],
-                    self._format_datetime(template["updated_at"]),
+                    self._format_short_date(template["updated_at"]),
                 ),
             )
         if self.selected_template_id in valid_ids:
@@ -2417,7 +2417,7 @@ class AdminPage(tk.Frame):
                 "end",
                 iid=str(item_id),
                 tags=(tag,),
-                values=(item["service_name"], self._format_datetime(item["updated_at"])),
+                values=(item["service_name"], self._format_short_date(item["updated_at"])),
             )
         if self.selected_service_catalog_id in valid_ids:
             self.service_catalog_tree.selection_set(str(self.selected_service_catalog_id))
@@ -2449,7 +2449,7 @@ class AdminPage(tk.Frame):
                 values=(
                     item["service_name"],
                     item["account_email"],
-                    self._format_datetime(item["updated_at"]),
+                    self._format_short_date(item["updated_at"]),
                 ),
             )
         if self.selected_inventory_id in valid_ids:
@@ -2936,6 +2936,16 @@ class AdminPage(tk.Frame):
             return "-"
         try:
             return parse_local_datetime(value).strftime("%d %b, %I:%M %p")
+        except ValueError:
+            return value
+
+    def _format_short_date(self, value: str | None) -> str:
+        # Used only in narrow list-column contexts where the full
+        # "24 Jun, 06:26 AM" format gets clipped - date-only fits reliably.
+        if not value:
+            return "-"
+        try:
+            return parse_local_datetime(value).strftime("%d %b %Y")
         except ValueError:
             return value
 
