@@ -131,14 +131,19 @@ def start_update_and_relaunch(update_info: UpdateInfo, repo_root: Path = BASE_DI
         return False, update_info.message or "No downloadable update asset was found."
 
     if getattr(sys, "frozen", False):
+        # A frozen exe is not a python.exe stand-in - it never parses "-m
+        # module" - so it must be told via our own flag to run the updater
+        # instead of just launching another copy of the app (which is what
+        # silently happened before: the app appeared to "restart" while no
+        # update logic ever ran).
         relaunch = [sys.executable]
+        updater_prefix = [sys.executable, "--run-update-runner"]
     else:
         relaunch = [sys.executable, str(repo_root / "main.py")]
+        updater_prefix = [sys.executable, "-m", "app.update_runner"]
 
     command = [
-        sys.executable,
-        "-m",
-        "app.update_runner",
+        *updater_prefix,
         "--app-dir",
         str(repo_root),
         "--pid",

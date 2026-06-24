@@ -250,19 +250,25 @@ class AuthStore:
             "role": user["role"],
         }
 
-    def reset_password(self, private_code: str, new_password: str) -> tuple[bool, str]:
+    def reset_password(self, username: str, private_code: str, new_password: str) -> tuple[bool, str]:
         reset_code_hash = self.data.get("reset_code_hash", "")
         if not reset_code_hash or not verify_password(private_code.strip(), reset_code_hash):
             return False, "Private code is incorrect."
+        employee = self.data["users"].get(_user_key(username))
+        if employee is None or employee.get("is_deleted", False):
+            return False, "Username could not be found."
+        if employee.get("role") == "admin":
+            return False, "Admin password cannot be reset here."
+        if not employee.get("is_active", True):
+            return False, "This account is not active. Please contact the admin."
         if len(new_password) < 8:
             return False, "Password must be at least 8 characters."
-        employee = self.data["users"][DEFAULT_USERNAME.lower()]
         employee["password_hash"] = hash_password(new_password)
         employee["updated_at"] = _now()
         employee["cloud_synced_at"] = ""
         employee["cloud_sync_error"] = ""
         self.save()
-        return True, "Employee password reset successfully."
+        return True, "Password reset successfully."
 
     def list_users(self, include_admin: bool = False) -> list[dict]:
         users = []

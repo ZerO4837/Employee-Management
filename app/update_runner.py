@@ -113,7 +113,9 @@ def _run_installer(asset_path: Path) -> int:
     if suffix == ".msi":
         command = ["msiexec", "/i", str(asset_path), "/passive"]
     else:
-        command = [str(asset_path)]
+        # Without these, the Inno Setup wizard opens and waits for clicks
+        # instead of updating automatically - the whole point of this flow.
+        command = [str(asset_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     result = subprocess.run(command, startupinfo=_startupinfo(), check=False)
     return int(result.returncode)
 
@@ -138,14 +140,14 @@ def _relaunch(command: list[str], cwd: Path) -> None:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-dir", required=True)
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--asset-url", required=True)
     parser.add_argument("--asset-name", required=True)
     parser.add_argument("--relaunch", nargs="+", required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     app_dir = Path(args.app_dir)
     _wait_for_parent(args.pid)

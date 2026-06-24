@@ -11,6 +11,7 @@ class ResetPasswordPage(tk.Frame):
     def __init__(self, parent: tk.Misc, app) -> None:
         super().__init__(parent, bg=BG)
         self.app = app
+        self.username_var = tk.StringVar()
         self.code_var = tk.StringVar()
         self.password_var = tk.StringVar()
         self.confirm_var = tk.StringVar()
@@ -47,14 +48,15 @@ class ResetPasswordPage(tk.Frame):
             row=2, column=0, sticky="w", pady=(6, 24)
         )
 
-        self._entry(form, "Private code", self.code_var, 3, show="*")
-        self._entry(form, "New password", self.password_var, 5, show="*")
-        confirm_entry = self._entry(form, "Confirm password", self.confirm_var, 7, show="*")
+        self._entry(form, "Username", self.username_var, 3)
+        self._entry(form, "Private code", self.code_var, 5, show="*")
+        self._entry(form, "New password", self.password_var, 7, show="*")
+        confirm_entry = self._entry(form, "Confirm password", self.confirm_var, 9, show="*")
 
         make_button(form, "Reset Password", self._reset_password, "primary").grid(
-            row=9, column=0, sticky="ew", pady=(4, 12)
+            row=11, column=0, sticky="ew", pady=(4, 12)
         )
-        make_button(form, "Back to Login", lambda: self.app.show_page("login"), "light").grid(row=10, column=0, sticky="ew")
+        make_button(form, "Back to Login", lambda: self.app.show_page("login"), "light").grid(row=12, column=0, sticky="ew")
         confirm_entry.bind("<Return>", lambda _event: self._reset_password())
 
     def _entry(
@@ -72,16 +74,21 @@ class ResetPasswordPage(tk.Frame):
         return entry
 
     def _reset_password(self) -> None:
+        username = self.username_var.get().strip()
+        if not username:
+            messagebox.showerror("Missing username", "Enter the employee username to reset.")
+            return
         new_password = self.password_var.get()
         confirm = self.confirm_var.get()
         if new_password != confirm:
             messagebox.showerror("Password mismatch", "New password and confirmation do not match.")
             return
-        ok, message = self.app.auth.reset_password(self.code_var.get(), new_password)
+        ok, message = self.app.auth.reset_password(username, self.code_var.get(), new_password)
         if not ok:
             messagebox.showerror("Reset failed", message)
             return
         messagebox.showinfo("Password reset", message)
+        self.username_var.set("")
         self.code_var.set("")
         self.password_var.set("")
         self.confirm_var.set("")
