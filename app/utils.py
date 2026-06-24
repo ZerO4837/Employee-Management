@@ -56,3 +56,26 @@ def normalize_local_timestamp(value: str) -> str:
     except ValueError:
         return text
 
+
+def to_cloud_timestamp(value: str) -> str:
+    """Attach this PC's UTC offset to a naive local timestamp before pushing it to Supabase.
+
+    Postgres casts a bare (no-offset) string to `timestamptz` by assuming
+    it is already UTC. Every locally generated timestamp is naive local
+    time (e.g. Karachi, UTC+5), so without this, every push silently shifts
+    the stored moment by the local UTC offset - and since a pulled value
+    comes back with that offset attached and gets stripped to naive local
+    again on import, a row pushed and pulled repeatedly drifts further by
+    a full UTC-offset each round trip instead of just once.
+    """
+    text = (value or "").strip()
+    if not text:
+        return text
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if parsed.tzinfo is not None:
+        return text
+    return parsed.astimezone().isoformat(timespec="microseconds")
+

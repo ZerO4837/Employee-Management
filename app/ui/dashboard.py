@@ -2302,11 +2302,11 @@ class DashboardPage(tk.Frame):
                         message,
                     )
                     self._update_sales_entry_cache(updated)
-                    self.last_saved_label.configure(
-                        text="Data saved locally. Excel sync failed; use Sync Again With Excel."
-                    )
-                    if source in {"retry", "edit"}:
-                        messagebox.showwarning("Excel sync failed", f"Excel sync still failed:\n{message}")
+                    # No popup here on purpose: Excel access on this machine is
+                    # best-effort, not required - the admin's Sync All is the
+                    # reliable path, so a failed attempt here is not something
+                    # the employee can act on and should not look like an error.
+                    self.last_saved_label.configure(text="Data saved. Will be synced to Excel by the admin.")
         finally:
             self.refresh_all()
             self._start_next_excel_sync()

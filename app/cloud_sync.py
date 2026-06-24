@@ -16,6 +16,7 @@ from app.config import (
     SUPABASE_ADMIN_SECRET,
     SUPABASE_EMPLOYEE_SYNC_SECRET,
 )
+from app.utils import to_cloud_timestamp
 
 
 @dataclass
@@ -481,9 +482,9 @@ class CloudSyncService:
             "employee_username": row.get("employee_username", ""),
             "day_date": row.get("day_date", ""),
             "status": row.get("status", ""),
-            "started_at": row.get("started_at", ""),
-            "ended_at": row.get("ended_at") or "",
-            "updated_at": row.get("updated_at") or row.get("ended_at") or row.get("started_at", ""),
+            "started_at": to_cloud_timestamp(row.get("started_at", "")),
+            "ended_at": to_cloud_timestamp(row.get("ended_at") or ""),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("ended_at") or row.get("started_at", "")),
         }
 
     def _attendance_shift_payload(self, row: dict) -> dict:
@@ -493,12 +494,12 @@ class CloudSyncService:
             "shift_date": row.get("shift_date", ""),
             "shift_number": int(row.get("shift_number") or 0),
             "status": row.get("status", ""),
-            "started_at": row.get("started_at", ""),
-            "ended_at": row.get("ended_at") or "",
+            "started_at": to_cloud_timestamp(row.get("started_at", "")),
+            "ended_at": to_cloud_timestamp(row.get("ended_at") or ""),
             "break_count": int(row.get("break_count") or 0),
             "total_break_seconds": int(row.get("total_break_seconds") or 0),
-            "current_break_started_at": row.get("current_break_started_at") or "",
-            "updated_at": row.get("updated_at") or row.get("ended_at") or row.get("started_at", ""),
+            "current_break_started_at": to_cloud_timestamp(row.get("current_break_started_at") or ""),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("ended_at") or row.get("started_at", "")),
         }
 
     def _attendance_day_event_payload(self, row: dict, day_cloud_id: str) -> dict:
@@ -509,9 +510,9 @@ class CloudSyncService:
             "day_date": row.get("day_date", ""),
             "event_type": row.get("event_type", ""),
             "event_label": row.get("event_label", ""),
-            "event_time": row.get("event_time", ""),
+            "event_time": to_cloud_timestamp(row.get("event_time", "")),
             "details": row.get("details", ""),
-            "updated_at": row.get("updated_at") or row.get("event_time", ""),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("event_time", "")),
         }
 
     def _attendance_event_payload(self, row: dict, shift_cloud_id: str) -> dict:
@@ -523,17 +524,18 @@ class CloudSyncService:
             "shift_number": int(row.get("shift_number") or 0),
             "event_type": row.get("event_type", ""),
             "event_label": row.get("event_label", ""),
-            "event_time": row.get("event_time", ""),
+            "event_time": to_cloud_timestamp(row.get("event_time", "")),
             "details": row.get("details", ""),
-            "updated_at": row.get("updated_at") or row.get("event_time", ""),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("event_time", "")),
         }
+
     def _service_catalog_payload(self, row: dict) -> dict:
         return {
             "cloud_id": row.get("cloud_id", ""),
             "service_name": row.get("service_name", ""),
             "created_by": row.get("created_by", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
             "is_active": bool(row.get("is_active", 1)),
         }
 
@@ -545,8 +547,8 @@ class CloudSyncService:
             "account_password": row.get("account_password", ""),
             "comment": row.get("comment", ""),
             "created_by": row.get("created_by", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
             "is_active": bool(row.get("is_active", 1)),
         }
 
@@ -567,15 +569,15 @@ class CloudSyncService:
             "excel_row": row.get("excel_row"),
             "excel_synced_at": row.get("excel_synced_at", ""),
             "excel_sync_error": row.get("excel_sync_error", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
         }
 
     def _app_setting_payload(self, row: dict) -> dict:
         return {
             "setting_key": row.get("setting_key", ""),
             "setting_value": row.get("setting_value", ""),
-            "updated_at": row.get("updated_at", ""),
+            "updated_at": to_cloud_timestamp(row.get("updated_at", "")),
         }
 
     def _employee_user_payload(self, row: dict) -> dict:
@@ -588,9 +590,9 @@ class CloudSyncService:
             "is_active": bool(row.get("is_active", True)),
             "is_deleted": bool(row.get("is_deleted", False)),
             "password_hash": row.get("password_hash", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
-            "deleted_at": row.get("deleted_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
+            "deleted_at": to_cloud_timestamp(row.get("deleted_at", "")),
         }
 
     def _announcement_payload(self, row: dict) -> dict:
@@ -600,8 +602,8 @@ class CloudSyncService:
             "title": row.get("title", ""),
             "message": row.get("message", ""),
             "created_by": row.get("created_by", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
             "is_active": bool(row.get("is_active", 1)),
         }
 
@@ -612,8 +614,8 @@ class CloudSyncService:
             "title": row.get("title") or row.get("service_name", ""),
             "message": row.get("message", ""),
             "created_by": row.get("created_by", ""),
-            "created_at": row.get("created_at", ""),
-            "updated_at": row.get("updated_at") or row.get("created_at", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
             "is_active": bool(row.get("is_active", 1)),
         }
 

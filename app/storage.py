@@ -39,6 +39,12 @@ _CLOUD_TIMESTAMP_FIELDS = (
 # preferences (remembered login username) that must never leave this PC.
 CLOUD_SYNCED_SETTING_KEYS = frozenset({"sales_workbook_path", "sales_worksheet_name"})
 
+# Sentinel stored in sales_entries.excel_sync_error when an already-synced
+# entry gets edited. Reusing this existing text column (rather than adding a
+# new one) lets admin.py distinguish "edited, needs a fresh sync" from a
+# genuine sync failure, without a schema migration.
+EXCEL_RESYNC_AFTER_EDIT_MESSAGE = "Entry edited after Excel sync; re-sync needed."
+
 
 def _normalize_cloud_timestamps(item: dict) -> dict:
     """Reformat any offset-aware timestamps from a synced Supabase row to naive local time.
@@ -2672,6 +2678,23 @@ class AttendanceStore:
             ).fetchall()
         return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
 
+    def list_sales_entries_needing_excel_sync(self, limit: int = 1000) -> list[dict]:
+        # Oldest first: screen-shared services (Netflix/HBO) append each new
+        # customer to the same Excel row in the order they were sold, so a
+        # batch sync must process entries in that same chronological order.
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM sales_entries
+                WHERE excel_synced_at = ''
+                  AND LOWER(excel_sync_error) NOT LIKE '%account is full%'
+                ORDER BY entry_date ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
+
     def create_sales_entry(self, employee_username: str, entry_date: str, entry: dict[str, str]) -> dict:
         created_at = _iso()
         buying_amount = entry.get("buying_amount", "0")
@@ -2722,7 +2745,7 @@ class AttendanceStore:
         with self.connect() as connection:
             previous = connection.execute(
                 """
-                SELECT customer, item, order_id
+                SELECT customer, item, order_id, excel_synced_at
                 FROM sales_entries
                 WHERE id = ? AND employee_username = ?
                 """,
@@ -2730,6 +2753,7 @@ class AttendanceStore:
             ).fetchone()
             if previous is None:
                 raise ValueError("Sales entry could not be found.")
+            needs_excel_resync = bool(previous["excel_synced_at"])
             connection.execute(
                 """
                 UPDATE sales_entries
@@ -2768,6 +2792,16 @@ class AttendanceStore:
                     employee_username,
                 ),
             )
+            if needs_excel_resync:
+                connection.execute(
+                    """
+                    UPDATE sales_entries
+                    SET excel_synced_at = '',
+                        excel_sync_error = ?
+                    WHERE id = ? AND employee_username = ?
+                    """,
+                    (EXCEL_RESYNC_AFTER_EDIT_MESSAGE, entry_id, employee_username),
+                )
             row = connection.execute(
                 "SELECT * FROM sales_entries WHERE id = ? AND employee_username = ?",
                 (entry_id, employee_username),

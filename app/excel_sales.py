@@ -362,6 +362,13 @@ class SalesWorkbook:
                     excel.Quit()
                 except Exception:
                     pass
+            # Drop the COM references explicitly and collect before
+            # uninitializing - otherwise a lingering reference can keep the
+            # background EXCEL.EXE process alive, which then makes the next
+            # sync attempt fail with "already open" style errors.
+            del workbook
+            del excel
+            gc.collect()
             pythoncom.CoUninitialize()
 
     def _select_com_sheet(self, workbook):
@@ -700,4 +707,31 @@ class SalesWorkbook:
                 "OneDrive closed the workbook file handle while saving. Make sure the workbook "
                 "is kept on this device and is not open in Excel, then try again."
             )
+        com_message = self._com_error_message(exc)
+        if com_message:
+            return com_message
         return str(exc)
+
+    def _com_error_message(self, exc: Exception) -> str | None:
+        # pywintypes.com_error is only importable on Windows with pywin32
+        # installed, so detect it by name instead of importing it here -
+        # this keeps the raw COM exception text (full of file paths and
+        # internal Excel error codes) from ever reaching an employee.
+        if type(exc).__name__ != "com_error":
+            return None
+        text = str(exc).lower()
+        if "cannot access the file" in text:
+            return (
+                "This computer cannot reach the linked Excel workbook right now. It may need "
+                "to be signed in to the OneDrive account that has access to it. "
+                "Contact the admin, then use Sync Again With Excel."
+            )
+        if "already open" in text:
+            return (
+                "The linked Excel workbook is currently open elsewhere. Close it everywhere "
+                "it is open, then use Sync Again With Excel."
+            )
+        return (
+            "Excel could not complete the sync on this computer. Contact the admin, then use "
+            "Sync Again With Excel."
+        )

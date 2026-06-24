@@ -166,6 +166,12 @@ class EmployeeApp(tk.Tk):
             self._normalize_current_user_notification_reads()
             self.show_page("admin" if self.current_role == "admin" else "dashboard")
             self.after(700, self.start_update_check)
+            if self.current_role == "employee":
+                # The local account cache used for the verify() above can be
+                # stale if this account was just deleted/frozen elsewhere -
+                # pull immediately so a revoked account is caught in seconds
+                # rather than waiting for the next scheduled sync.
+                self.request_cloud_sync(push_local=False)
             return
         login_page = self.pages.get("login")
         if hasattr(login_page, "show_login_error"):
@@ -318,17 +324,28 @@ class EmployeeApp(tk.Tk):
                 page._refresh_inventory_items()
                 page._refresh_sales_data()
                 page._refresh_excel_settings()
-            if self.current_role == "employee" and self.current_user:
-                current_profile = self.auth.get_user(self.current_user)
-                if current_profile is None or not current_profile.get("is_active", True):
-                    messagebox.showwarning(
-                        "Account not active",
-                        "Your employee account is not active anymore. Please contact the admin.",
-                        parent=self,
-                    )
-                    self.logout()
+        # Checked unconditionally on every sync tick, not only when this
+        # particular cycle happened to report a change - otherwise a
+        # just-deleted/frozen account stays logged in until some other
+        # unrelated change happens to trigger a re-check.
+        self._enforce_current_employee_account_status()
         if isinstance(page, AdminPage) and hasattr(page, "set_cloud_sync_status"):
             page.set_cloud_sync_status(result.message, ok=result.ok)
+
+    def _enforce_current_employee_account_status(self) -> None:
+        if self.current_role != "employee" or not self.current_user:
+            return
+        current_profile = self.auth.get_user(self.current_user)
+        if current_profile is not None and current_profile.get("is_active", True):
+            return
+        if current_profile is None:
+            message = "This account could not be found. Please contact the admin."
+            title = "Account not found"
+        else:
+            message = "Your employee account is not active anymore. Please contact the admin."
+            title = "Account not active"
+        messagebox.showwarning(title, message, parent=self)
+        self.logout()
 
     def start_update_check(self) -> None:
         if self.update_check_started:

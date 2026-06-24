@@ -29,6 +29,7 @@ from app.config import (
     WHITE,
 )
 from app.excel_sales import ExcelSyncResult
+from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE
 from app.ui.widgets import (
     MetricCard,
     SurfaceCard,
@@ -108,6 +109,12 @@ class AdminPage(tk.Frame):
         self.admin_excel_sync_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
         self.admin_excel_sync_pending_entry_ids: set[str] = set()
         self.admin_retry_button: tk.Button | None = None
+        self.admin_sync_all_button: tk.Button | None = None
+        self.admin_excel_sync_all_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
+        self.admin_excel_sync_all_running = False
+        self.admin_excel_sync_all_remaining = 0
+        self.admin_excel_sync_all_succeeded = 0
+        self.admin_excel_sync_all_failed = 0
         self.dashboard_daily_sales_points: list[dict] = []
         self.dashboard_best_sales_date = ""
         self._admin_excel_poll_after_id: str | None = None
@@ -1295,6 +1302,8 @@ class AdminPage(tk.Frame):
         self.sales_period_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_sales_data())
         self.admin_retry_button = make_button(controls, "Retry Selected Sync", self.retry_selected_admin_sales_sync, "warning")
         self.admin_retry_button.pack(side="left", padx=(0, 10))
+        self.admin_sync_all_button = make_button(controls, "Sync All to Excel", self.sync_all_to_excel, "success")
+        self.admin_sync_all_button.pack(side="left", padx=(0, 10))
         make_button(controls, "Refresh", self.refresh_all, "light").pack(side="left")
 
         columns = (
@@ -1351,6 +1360,7 @@ class AdminPage(tk.Frame):
         self.sales_data_tree.tag_configure("sales_synced", background="#eafaf4", foreground=TEXT)
         self.sales_data_tree.tag_configure("sales_pending", background="#eef6ff", foreground=TEXT)
         self.sales_data_tree.tag_configure("sales_retry", background="#fff8ea", foreground=TEXT)
+        self.sales_data_tree.tag_configure("sales_edited", background="#f3ecff", foreground=TEXT)
         self.sales_data_tree.grid(row=2, column=0, sticky="nsew")
         self.sales_data_tree.bind("<<TreeviewSelect>>", lambda _event: self._refresh_admin_retry_action())
 
@@ -2506,14 +2516,22 @@ class AdminPage(tk.Frame):
 
     def _sales_period_options(self) -> list[str]:
         today = date.today()
+        day_options = [(today - timedelta(days=offset)).strftime("%d %b %Y") for offset in range(30)]
         month_options = [f"{calendar.month_name[month]} Sales" for month in range(1, today.month + 1)]
-        return ["Last 5 Days", *month_options]
+        return ["Last 5 Days", *day_options, *month_options]
 
     def _selected_sales_period_range(self) -> tuple[str, str, str]:
         selection = self.sales_period_var.get()
         if selection == "Last 5 Days":
             start_date, end_date = self._sales_visible_date_range()
             return start_date, end_date, "Last 5 Days"
+
+        if not selection.endswith(" Sales"):
+            try:
+                day = datetime.strptime(selection, "%d %b %Y").strftime("%Y-%m-%d")
+                return day, day, selection
+            except ValueError:
+                pass
 
         today = date.today()
         month_name = selection.replace(" Sales", "")
@@ -2559,6 +2577,8 @@ class AdminPage(tk.Frame):
         if entry.get("excel_synced_at"):
             return "Synced"
         error = str(entry.get("excel_sync_error", "")).strip()
+        if error == EXCEL_RESYNC_AFTER_EDIT_MESSAGE:
+            return "Edited - Resync"
         if self._is_blocked_excel_sync_message(error):
             return "Not saved"
         if not error:
@@ -2570,6 +2590,8 @@ class AdminPage(tk.Frame):
             return "sales_synced"
         if sync_label == "Syncing":
             return "sales_pending"
+        if sync_label == "Edited - Resync":
+            return "sales_edited"
         if sync_label in {"Retry needed", "Not saved"}:
             return "sales_retry"
         return "sales_even" if index % 2 == 0 else "sales_odd"
@@ -2636,6 +2658,71 @@ class AdminPage(tk.Frame):
             sync_result = ExcelSyncResult(False, message=str(exc))
         self.admin_excel_sync_results.put((entry, sync_result))
 
+    def sync_all_to_excel(self) -> None:
+        if self.admin_excel_sync_all_running:
+            show_app_alert(self, "Already syncing", "A full Excel sync is already in progress.", "info")
+            return
+        pending = self.app.attendance_store.list_sales_entries_needing_excel_sync(limit=1000)
+        if not pending:
+            show_app_alert(self, "Nothing to sync", "Every sales entry is already synced with Excel.", "info")
+            return
+        for entry in pending:
+            self.admin_excel_sync_pending_entry_ids.add(str(entry["id"]))
+        self.admin_excel_sync_all_running = True
+        self.admin_excel_sync_all_remaining = len(pending)
+        self.admin_excel_sync_all_succeeded = 0
+        self.admin_excel_sync_all_failed = 0
+        self._refresh_sales_data()
+        show_app_alert(
+            self,
+            "Syncing to Excel",
+            f"Syncing {len(pending)} sales entries to Excel in the background. This page will update when it finishes.",
+            "info",
+        )
+        worker = threading.Thread(target=self._run_admin_excel_sync_all_worker, args=(pending,), daemon=True)
+        worker.start()
+
+    def _run_admin_excel_sync_all_worker(self, entries: list[dict]) -> None:
+        # Entries are processed one at a time, in the same order they were
+        # sold, so screen-shared services (Netflix/HBO) append customers to
+        # the right Excel row in the right order instead of racing each other.
+        for entry in entries:
+            try:
+                sync_result = self.app.sales_workbook.sync_entry(entry)
+            except Exception as exc:
+                sync_result = ExcelSyncResult(False, message=str(exc))
+            self.admin_excel_sync_all_results.put((entry, sync_result))
+
+    def _finish_admin_excel_sync_all_item(self, entry: dict, sync_result: ExcelSyncResult) -> None:
+        entry_id = str(entry.get("id", ""))
+        employee_username = str(entry.get("employee_username", ""))
+        self.admin_excel_sync_pending_entry_ids.discard(entry_id)
+        if sync_result.saved and sync_result.row is not None:
+            self.app.attendance_store.mark_sales_excel_sync(int(entry["id"]), employee_username, sync_result.row)
+            self.admin_excel_sync_all_succeeded += 1
+        else:
+            message = sync_result.message or "Excel sync failed."
+            if self._is_blocked_excel_sync_result(sync_result):
+                self.app.attendance_store.delete_sales_entry(int(entry["id"]), employee_username)
+            else:
+                self.app.attendance_store.mark_sales_excel_error(int(entry["id"]), employee_username, message)
+            self.admin_excel_sync_all_failed += 1
+        self.admin_excel_sync_all_remaining -= 1
+        if self.admin_excel_sync_all_remaining <= 0:
+            self.admin_excel_sync_all_running = False
+            self._refresh_sales_data()
+            succeeded = self.admin_excel_sync_all_succeeded
+            failed = self.admin_excel_sync_all_failed
+            if failed:
+                show_app_alert(
+                    self,
+                    "Sync to Excel finished",
+                    f"Synced {succeeded} entries. {failed} could not be synced and are marked for retry.",
+                    "warning",
+                )
+            else:
+                show_app_alert(self, "Sync to Excel finished", f"Synced {succeeded} entries to Excel.", "success")
+
     def _poll_admin_excel_sync_results(self) -> None:
         if not self.winfo_exists():
             return
@@ -2645,6 +2732,12 @@ class AdminPage(tk.Frame):
             except queue.Empty:
                 break
             self._finish_admin_excel_sync(entry, sync_result)
+        while True:
+            try:
+                entry, sync_result = self.admin_excel_sync_all_results.get_nowait()
+            except queue.Empty:
+                break
+            self._finish_admin_excel_sync_all_item(entry, sync_result)
         self._admin_excel_poll_after_id = self.after(250, self._poll_admin_excel_sync_results)
 
     def _finish_admin_excel_sync(self, entry: dict, sync_result: ExcelSyncResult) -> None:
