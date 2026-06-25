@@ -52,7 +52,7 @@ try:
     SUPABASE_SYNC_INTERVAL_SECONDS = int(os.environ.get("DSP_SUPABASE_SYNC_INTERVAL_SECONDS", "15"))
 except ValueError:
     SUPABASE_SYNC_INTERVAL_SECONDS = 15
-_sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH") or str(DATA_DIR / "sales_entries.xlsx")
+_sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH", "")
 SALES_WORKBOOK_PATH = Path(os.path.expandvars(_sales_workbook_setting)).expanduser()
 SALES_WORKSHEET_NAME = os.environ.get("DSP_SALES_WORKSHEET_NAME", "").strip()
 SALES_EXCEL_DATE_FORMAT = "d/m/yyyy"

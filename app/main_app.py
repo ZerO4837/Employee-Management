@@ -25,7 +25,6 @@ from app.config import (
     BG,
     DEFAULT_USERNAME,
     LOGO_PATH,
-    SALES_WORKBOOK_PATH,
     SALES_WORKSHEET_NAME,
 )
 from app.excel_sales import SalesWorkbook
@@ -406,7 +405,7 @@ class EmployeeApp(tk.Tk):
         self._finish_close_app()
 
     def load_sales_workbook_settings(self) -> None:
-        workbook_path = self.attendance_store.get_setting("sales_workbook_path", str(SALES_WORKBOOK_PATH))
+        workbook_path = self.attendance_store.get_setting("sales_workbook_path", "")
         worksheet_name = self.attendance_store.get_setting("sales_worksheet_name", SALES_WORKSHEET_NAME)
         self.sales_workbook = SalesWorkbook(workbook_path, worksheet_name)
 

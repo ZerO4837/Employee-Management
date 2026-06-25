@@ -161,4 +161,8 @@ def start_update(update_info: UpdateInfo, repo_root: Path = BASE_DIR) -> tuple[b
         startupinfo=_startupinfo(),
         creationflags=creationflags,
     )
-    return True, "Updater started. The app will close now; reopen it manually once you see the update-complete message."
+    return (
+        True,
+        "Updater started. The app will close now. This can take a few minutes - reopen the app "
+        "yourself once you see the update-complete message.",
+    )
