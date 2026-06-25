@@ -898,10 +898,10 @@ class DashboardPage(tk.Frame):
         sync_row = tk.Frame(side, bg=WHITE)
         sync_row.grid(row=2, column=0, sticky="ew", pady=(0, 18))
         sync_row.grid_columnconfigure(1, weight=1)
-        tk.Label(sync_row, text="Excel Sync", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 10)).grid(
+        tk.Label(sync_row, text="Status", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 10)).grid(
             row=0, column=0, sticky="w", padx=(0, 10)
         )
-        self.excel_sync_status_label = status_pill(sync_row, "Up to date", fg=SUCCESS, bg="#eafaf4")
+        self.excel_sync_status_label = status_pill(sync_row, "Data Added", fg=SUCCESS, bg="#eafaf4")
         self.excel_sync_status_label.grid(row=0, column=1, sticky="w")
 
         GradientBand(side, start=BLUE, end=TEAL, height=4).grid(row=3, column=0, sticky="ew", pady=(0, 18))
@@ -1991,15 +1991,13 @@ class DashboardPage(tk.Frame):
             self._apply_access_state()
 
     def _sales_entry_sync_state(self, entry: dict[str, str]) -> tuple[str, str]:
-        if str(entry.get("id", "")) in self.excel_sync_pending_entry_ids:
-            return "Syncing", BLUE
+        # Excel sync is the admin's responsibility now (Sync All from the
+        # admin panel), not something an employee needs to track per entry -
+        # the only exception is "account full", which the employee actually
+        # needs to act on by using a different account email.
         if self._is_blocked_excel_sync_message(entry.get("excel_sync_error", "")):
             return "Not saved", WARNING
-        if not entry.get("excel_synced_at") and entry.get("excel_sync_error"):
-            return "Retry needed", WARNING
-        if entry.get("excel_synced_at"):
-            return "Synced", SUCCESS
-        return "Saved", MUTED
+        return "Data Added", SUCCESS
 
     def _is_blocked_excel_sync_message(self, message: object) -> bool:
         return "account is full" in str(message or "").lower()
@@ -2009,25 +2007,14 @@ class DashboardPage(tk.Frame):
 
     def _refresh_sales_sidebar(self, today_entries: list[dict[str, str]]) -> None:
         if self.excel_sync_status_label is not None:
-            pending_count = len(self.excel_sync_pending_entry_ids)
-            retry_count = sum(
-                1
-                for entry in self.sales_entries
-                if not entry.get("excel_synced_at")
-                and entry.get("excel_sync_error")
-                and not self._is_blocked_excel_sync_message(entry.get("excel_sync_error", ""))
-                and str(entry.get("id", "")) not in self.excel_sync_pending_entry_ids
-            )
-            if pending_count:
-                if self.close_after_excel_sync_requested:
-                    text = "Closing after sync"
-                else:
-                    text = "Syncing" if pending_count == 1 else f"{pending_count} syncing"
-                self.excel_sync_status_label.configure(text=text, fg=BLUE, bg="#eef6ff")
-            elif retry_count:
-                self.excel_sync_status_label.configure(text="Retry needed", fg=WARNING, bg="#fff5e6")
+            # Deliberately not reflecting per-entry Excel sync state here
+            # anymore - that's the admin's Sync All to track, not the
+            # employee's. "Closing after sync" is kept since it explains why
+            # the app is briefly unresponsive, which the employee does need.
+            if self.close_after_excel_sync_requested:
+                self.excel_sync_status_label.configure(text="Closing after sync", fg=BLUE, bg="#eef6ff")
             else:
-                self.excel_sync_status_label.configure(text="Up to date", fg=SUCCESS, bg="#eafaf4")
+                self.excel_sync_status_label.configure(text="Data Added", fg=SUCCESS, bg="#eafaf4")
 
         if self.sales_recent_frame is None:
             return
@@ -2281,20 +2268,22 @@ class DashboardPage(tk.Frame):
                     sync_result.row,
                 )
                 self._update_sales_entry_cache(updated)
-                if source == "edit":
-                    self.last_saved_label.configure(text="Data updated and synced with Excel.")
-                elif source == "retry":
-                    self.last_saved_label.configure(text="Data synced with Excel.")
-                else:
-                    self.last_saved_label.configure(text="Data added and synced with Excel.")
+                # No text update for "new"/"edit" here on purpose: the label
+                # already shows "Data Added."/"Data updated." from the
+                # moment the entry was saved, and whether this PC's own
+                # best-effort Excel attempt happened to succeed isn't
+                # something the employee needs to track - the admin's Sync
+                # All is the path that matters. "retry" is a deliberate,
+                # explicit action though, so it still gets a direct answer.
                 if source == "retry":
+                    self.last_saved_label.configure(text="Data synced with Excel.", fg=SUCCESS)
                     messagebox.showinfo("Excel synced", "Data synced with Excel.")
             else:
                 message = sync_result.message or "Excel sync failed."
                 if self._is_blocked_excel_sync_result(sync_result) and source != "edit":
                     self.app.attendance_store.delete_sales_entry(int(entry["id"]), self._employee_username())
                     self._remove_sales_entry_cache(entry_id)
-                    self.last_saved_label.configure(text="Account full. Data was not saved.")
+                    self.last_saved_label.configure(text="Account full. Data was not saved.", fg=WARNING)
                     messagebox.showwarning("Account full", message)
                 elif self._is_blocked_excel_sync_result(sync_result):
                     updated = self.app.attendance_store.mark_sales_excel_error(
@@ -2303,20 +2292,20 @@ class DashboardPage(tk.Frame):
                         message,
                     )
                     self._update_sales_entry_cache(updated)
-                    self.last_saved_label.configure(text="Excel update blocked. Use a new account email.")
+                    self.last_saved_label.configure(text="Excel update blocked. Use a new account email.", fg=WARNING)
                     messagebox.showwarning("Account full", message)
                 else:
-                    updated = self.app.attendance_store.mark_sales_excel_error(
-                        int(entry["id"]),
-                        self._employee_username(),
-                        message,
-                    )
-                    self._update_sales_entry_cache(updated)
-                    # No popup here on purpose: Excel access on this machine is
-                    # best-effort, not required - the admin's Sync All is the
-                    # reliable path, so a failed attempt here is not something
-                    # the employee can act on and should not look like an error.
-                    self.last_saved_label.configure(text="Data saved. Will be synced to Excel by the admin.")
+                    # Deliberately not calling mark_sales_excel_error here:
+                    # this PC's Excel attempt is best-effort and basically
+                    # always fails without OneDrive access, which is
+                    # expected, not a real problem. Recording that expected
+                    # failure into excel_sync_error used to make the admin's
+                    # Sales Data tab show "Retry needed" on entries nobody
+                    # with real Excel access had even tried yet - leaving the
+                    # entry untouched here keeps it correctly showing as
+                    # "not synced yet" until the admin's Sync All (or a
+                    # genuine admin-side retry) actually attempts it.
+                    pass
         finally:
             self.refresh_all()
             self._start_next_excel_sync()
@@ -2550,7 +2539,7 @@ class DashboardPage(tk.Frame):
         entry["time"] = now_label()
         saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
         daily_number = len(self.app.attendance_store.list_sales_entries(self._employee_username(), entry["date"]))
-        self.last_saved_label.configure(text="Data added. Excel syncing...")
+        self.last_saved_label.configure(text="Data Added.", fg=SUCCESS)
         self.clear_sales_form()
         self.refresh_all()
         self._queue_excel_sync(self._sales_entry_from_store_row(saved), "new", daily_number)
@@ -2597,8 +2586,6 @@ class EditEntryWindow(tk.Toplevel):
         self.entry = entry
         self.display_number = dashboard._sales_entry_display_number(entry)
         self.title(f"Edit Entry #{self.display_number}")
-        self.geometry("760x560")
-        self.minsize(720, 540)
         self.configure(bg=BG)
         self.transient(dashboard.app)
         self._set_window_icon()
@@ -2609,6 +2596,7 @@ class EditEntryWindow(tk.Toplevel):
         self.status_other_var = tk.StringVar()
         self.status_other_widgets: list[tk.Widget] = []
         self._build()
+        self._configure_window_geometry()
         self._center_on_parent()
 
     def _set_window_icon(self) -> None:
@@ -2616,10 +2604,34 @@ class EditEntryWindow(tk.Toplevel):
         if logo is not None:
             self.iconphoto(False, logo)
 
+    def _configure_window_geometry(self) -> None:
+        # A fixed 760x560 used to clip the Save/Cancel row whenever the
+        # conditional "Other Service Name"/"Other Status Reason" fields were
+        # showing, or on a shorter screen. The form area now scrolls on its
+        # own (see _build), so this only needs to pick a sane starting size,
+        # not guarantee every field fits without scrolling.
+        screen_height = self.winfo_screenheight()
+        width = 760
+        height = min(560, max(420, screen_height - 160))
+        self.geometry(f"{width}x{height}")
+        self.minsize(700, min(420, height))
+
     def _build(self) -> None:
-        panel = SurfaceCard(self, padx=24, pady=22, accent=True, accent_start=BLUE, accent_end=TEAL)
+        panel = SurfaceCard(self, padx=0, pady=0, accent=True, accent_start=BLUE, accent_end=TEAL)
         panel.pack(fill="both", expand=True, padx=20, pady=20)
-        body = panel.body
+        outer = panel.body
+        outer.configure(padx=0, pady=0)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(0, weight=1)
+
+        # The form fields scroll on their own now, and Save/Cancel live in a
+        # separate, fixed row below them - that way the buttons are always
+        # reachable no matter how many conditional fields ("Other Service
+        # Name"/"Other Status Reason") happen to be showing, instead of a
+        # fixed-height window silently clipping them off the bottom.
+        scroll_container, body = make_scrollable_region(outer, bg=WHITE)
+        scroll_container.grid(row=0, column=0, sticky="nsew")
+        body.configure(padx=24, pady=22)
         body.grid_columnconfigure((0, 1), weight=1)
 
         tk.Label(body, text=f"Edit Entry #{self.display_number}", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
@@ -2636,8 +2648,11 @@ class EditEntryWindow(tk.Toplevel):
         self._item_other_field(body, row + 2, 1)
         self._status_other_field(body, row + 4, 0)
 
-        make_button(body, "Save Changes", self.save, "primary").grid(row=row + 6, column=0, sticky="ew", padx=(0, 8), pady=(8, 0))
-        make_button(body, "Cancel", self.destroy, "light").grid(row=row + 6, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        actions = tk.Frame(outer, bg=WHITE, padx=24, pady=(10, 22))
+        actions.grid(row=1, column=0, sticky="ew")
+        actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(actions, "Save Changes", self.save, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        make_button(actions, "Cancel", self.destroy, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
     def _field(
         self,
@@ -2684,8 +2699,11 @@ class EditEntryWindow(tk.Toplevel):
         self.update_idletasks()
         parent = self.dashboard.app
         parent.update_idletasks()
-        width = max(self.winfo_width(), 760)
-        height = max(self.winfo_height(), 560)
+        # Use whatever _configure_window_geometry already picked - it already
+        # accounted for the actual screen size, so re-applying a fixed
+        # fallback here would just undo that on a shorter screen.
+        width = self.winfo_width()
+        height = self.winfo_height()
         x_position = parent.winfo_rootx() + max((parent.winfo_width() - width) // 2, 0)
         y_position = parent.winfo_rooty() + max((parent.winfo_height() - height) // 2, 0)
         self.geometry(f"{width}x{height}+{x_position}+{y_position}")
@@ -2772,7 +2790,8 @@ class EditEntryWindow(tk.Toplevel):
         self.entry.update(updated_entry)
         self.dashboard._update_sales_entry_cache(updated)
         self.dashboard.last_saved_label.configure(
-            text="Data updated. Excel syncing..."
+            text="Data Updated.",
+            fg=SUCCESS,
         )
         self.dashboard.refresh_all()
         self.dashboard._queue_excel_sync(updated_entry, "edit", self.display_number)

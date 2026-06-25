@@ -1078,6 +1078,47 @@ class AttendanceStore:
     def has_active_shift(self, employee_username: str) -> bool:
         return self.get_active_shift(employee_username) is not None
 
+    def purge_old_attendance(self, cutoff_date: str) -> dict[str, int]:
+        """Delete attendance days/shifts/events dated before cutoff_date, so
+        the local database doesn't grow without bound. Returns a per-table
+        row count, mostly useful for testing/visibility."""
+        counts: dict[str, int] = {}
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM attendance_events WHERE shift_date < ?", (cutoff_date,))
+            counts["attendance_events"] = int(cursor.rowcount)
+            cursor = connection.execute("DELETE FROM attendance_day_events WHERE day_date < ?", (cutoff_date,))
+            counts["attendance_day_events"] = int(cursor.rowcount)
+            cursor = connection.execute("DELETE FROM attendance_shifts WHERE shift_date < ?", (cutoff_date,))
+            counts["attendance_shifts"] = int(cursor.rowcount)
+            cursor = connection.execute("DELETE FROM attendance_days WHERE day_date < ?", (cutoff_date,))
+            counts["attendance_days"] = int(cursor.rowcount)
+        return counts
+
+    def purge_old_attendance_if_due(self, retention_days: int = 30) -> dict[str, int] | None:
+        """Runs purge_old_attendance at most once per calendar day (tracked
+        via a local-only setting, never cloud-synced - each PC keeps its own
+        schedule). Returns the per-table counts if a purge ran, else None."""
+        today = _today()
+        if self.get_setting("attendance_last_purge_date", "") == today:
+            return None
+        cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+        counts = self.purge_old_attendance(cutoff)
+        self.set_setting("attendance_last_purge_date", today)
+        return counts
+
+    def delete_attendance_shift(self, shift_id: int) -> str:
+        """Delete a shift and its events. Returns the shift's cloud_id (may
+        be empty) so the caller can also remove the cloud copy - otherwise a
+        synced shift would just get silently re-imported on the next pull."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT cloud_id FROM attendance_shifts WHERE id = ?", (shift_id,)
+            ).fetchone()
+            cloud_id = str(row["cloud_id"]) if row is not None else ""
+            connection.execute("DELETE FROM attendance_events WHERE shift_id = ?", (shift_id,))
+            connection.execute("DELETE FROM attendance_shifts WHERE id = ?", (shift_id,))
+        return cloud_id
+
     def list_shift_summaries(self, limit: int = 250) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -2672,7 +2713,7 @@ class AttendanceStore:
                 SELECT * FROM sales_entries
                 WHERE entry_date BETWEEN ? AND ?
                 {employee_filter}
-                ORDER BY entry_date DESC, id DESC
+                ORDER BY entry_date DESC, created_at DESC
                 """,
                 tuple(params),
             ).fetchall()
@@ -2688,7 +2729,7 @@ class AttendanceStore:
                 SELECT * FROM sales_entries
                 WHERE excel_synced_at = ''
                   AND LOWER(excel_sync_error) NOT LIKE '%account is full%'
-                ORDER BY entry_date ASC, id ASC
+                ORDER BY entry_date ASC, created_at ASC
                 LIMIT ?
                 """,
                 (limit,),

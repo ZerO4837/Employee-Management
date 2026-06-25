@@ -686,6 +686,10 @@ begin
   return query
   select d.cloud_id, d.employee_username, d.day_date, d.status, d.started_at, d.ended_at, d.updated_at
   from public.dsp_attendance_days d
+  -- 35-day buffer, 5 days past the app's own 30-day local retention, so a
+  -- locally-purged record never gets silently re-pulled and looks "active"
+  -- again the next time cloud sync runs.
+  where d.day_date >= (now() - interval '35 days')::date
   order by d.updated_at desc, d.started_at desc
   limit 3000;
 end;
@@ -718,6 +722,7 @@ begin
   select s.cloud_id, s.employee_username, s.shift_date, s.shift_number, s.status, s.started_at, s.ended_at,
          s.break_count, s.total_break_seconds, s.current_break_started_at, s.updated_at
   from public.dsp_attendance_shifts s
+  where s.shift_date >= (now() - interval '35 days')::date
   order by s.updated_at desc, s.started_at desc
   limit 3000;
 end;
@@ -748,6 +753,7 @@ begin
   select e.cloud_id, e.day_cloud_id, e.employee_username, e.day_date, e.event_type, e.event_label,
          e.event_time, e.details, e.updated_at
   from public.dsp_attendance_day_events e
+  where e.day_date >= (now() - interval '35 days')::date
   order by e.event_time desc
   limit 5000;
 end;
@@ -779,6 +785,7 @@ begin
   select e.cloud_id, e.shift_cloud_id, e.employee_username, e.shift_date, e.shift_number,
          e.event_type, e.event_label, e.event_time, e.details, e.updated_at
   from public.dsp_attendance_events e
+  where e.shift_date >= (now() - interval '35 days')::date
   order by e.event_time desc
   limit 5000;
 end;
@@ -1003,3 +1010,25 @@ grant execute on function public.dsp_list_app_settings(text) to anon;
 grant execute on function public.dsp_upsert_sales_entry(text, jsonb) to anon;
 grant execute on function public.dsp_list_sales_entries(text) to anon;
 grant execute on function public.dsp_upsert_service_message_template(text, jsonb) to anon;
+
+-- Lets the admin panel delete a stuck/test attendance shift permanently
+-- instead of it silently reappearing on the next cloud sync pull. Deletion
+-- intentionally needs the admin secret, not just the employee sync secret -
+-- this is a destructive, owner-only action.
+create or replace function public.dsp_delete_attendance_shift(admin_secret text, target_cloud_id text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_admin_secret_valid(admin_secret) then
+    raise exception 'Invalid admin sync secret' using errcode = '28000';
+  end if;
+
+  delete from public.dsp_attendance_events where shift_cloud_id = target_cloud_id;
+  delete from public.dsp_attendance_shifts where cloud_id = target_cloud_id;
+end;
+$$;
+
+grant execute on function public.dsp_delete_attendance_shift(text, text) to anon;

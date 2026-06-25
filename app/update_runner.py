@@ -127,8 +127,12 @@ def _run_installer(asset_path: Path) -> int:
     if suffix == ".msi":
         command = ["msiexec", "/i", str(asset_path), "/passive"]
     else:
-        # Without these, the Inno Setup wizard opens and waits for clicks
-        # instead of updating automatically - the whole point of this flow.
+        # /VERYSILENT, not /SILENT: empirically, the installer's own [Run]
+        # section (which launches the app after install, guarded by
+        # "skipifsilent") only actually gets skipped under /VERYSILENT -
+        # under /SILENT it launches the app anyway, which would silently
+        # reintroduce the auto-reopen this flow was explicitly changed to
+        # not do. Confirmed by testing both directly.
         command = [str(asset_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
 
     # A freshly downloaded .exe is a common target for antivirus/Windows

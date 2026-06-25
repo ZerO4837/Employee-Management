@@ -110,6 +110,18 @@ class CloudSyncService:
         self.config_loader = config_loader
         self.auth_store = auth_store
 
+    def delete_attendance_shift(self, cloud_id: str) -> None:
+        if not cloud_id:
+            return
+        config = self.config_loader()
+        if not config.can_push:
+            return
+        client = SupabaseRestClient(config)
+        client.rpc(
+            "dsp_delete_attendance_shift",
+            {"admin_secret": config.admin_secret, "target_cloud_id": cloud_id},
+        )
+
     def sync(self, push_local: bool = False, pull_remote: bool = True) -> CloudSyncResult:
         config = self.config_loader()
         if not config.is_ready:

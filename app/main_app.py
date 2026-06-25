@@ -66,6 +66,10 @@ class EmployeeApp(tk.Tk):
 
         self.auth = AuthStore(AUTH_CONFIG_PATH)
         self.attendance_store = AttendanceStore(APP_DB_PATH)
+        # At most once per day, on whichever PC happens to start first that
+        # day - keeps 30+ day old attendance history from accumulating
+        # forever in the local database.
+        self.attendance_store.purge_old_attendance_if_due()
         self.sales_workbook = SalesWorkbook()
         self.load_sales_workbook_settings()
         self.logo_cache: dict[tuple[int, int], tk.PhotoImage] = {}

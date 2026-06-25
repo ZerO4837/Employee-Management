@@ -563,7 +563,9 @@ class AdminPage(tk.Frame):
         )
         self.shift_count_label = tk.Label(header, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
         self.shift_count_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        status_pill(header, "Local Records", fg=BLUE_DARK, bg="#eef6ff").grid(row=0, column=1, rowspan=2, sticky="e")
+        self.delete_shift_button = make_button(header, "Delete Selected", self.delete_selected_shift, "danger")
+        self.delete_shift_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(0, 10))
+        status_pill(header, "Local Records", fg=BLUE_DARK, bg="#eef6ff").grid(row=0, column=2, rowspan=2, sticky="e")
 
         columns = ("id", "date", "employee", "shift", "status", "check_in", "check_out", "breaks", "break_time")
         self.shifts_tree = ttk.Treeview(shifts, columns=columns, show="headings", selectmode="browse")
@@ -2582,7 +2584,7 @@ class AdminPage(tk.Frame):
         if self._is_blocked_excel_sync_message(error):
             return "Not saved"
         if not error:
-            return "Saved locally"
+            return "Not Synced Yet"
         return "Retry needed"
 
     def _sales_sync_tag(self, sync_label: str, index: int) -> str:
@@ -2905,6 +2907,36 @@ class AdminPage(tk.Frame):
         selection = self.shifts_tree.selection()
         self.selected_shift_id = int(selection[0]) if selection else None
         self._refresh_event_table(self.selected_shift_id)
+
+    def delete_selected_shift(self) -> None:
+        shift_id = self.selected_shift_id
+        if shift_id is None:
+            show_app_alert(self, "No shift selected", "Select a shift from the Attendance Sheet first.", "warning")
+            return
+        if not messagebox.askyesno(
+            "Delete shift",
+            "Delete this attendance shift and its events? This cannot be undone.",
+            parent=self,
+        ):
+            return
+        cloud_id = self.app.attendance_store.delete_attendance_shift(shift_id)
+        self.selected_shift_id = None
+        if cloud_id:
+            # Best-effort, fire-and-forget: without this, a previously
+            # synced shift would just get silently re-imported and look
+            # "active" again on the next cloud sync pull.
+            threading.Thread(target=self._delete_shift_from_cloud, args=(cloud_id,), daemon=True).start()
+        shifts = self.app.attendance_store.list_shift_summaries()
+        self._refresh_metrics(shifts)
+        self._refresh_shift_table(shifts)
+        self._refresh_event_table(None)
+        show_app_alert(self, "Shift deleted", "The attendance shift was removed.", "success")
+
+    def _delete_shift_from_cloud(self, cloud_id: str) -> None:
+        try:
+            self.app.cloud_sync_service.delete_attendance_shift(cloud_id)
+        except Exception:
+            pass
 
     def _shift_label(self, number: int) -> str:
         if number == 0:
