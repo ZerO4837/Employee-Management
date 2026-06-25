@@ -7,7 +7,7 @@ import sys
 
 APP_NAME = "Digital Service Pakistan Employee App"
 BUSINESS_NAME = "DIGITAL SERVICE PAKISTAN"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 UPDATE_REPO_OWNER = os.environ.get("DSP_UPDATE_REPO_OWNER", "ZerO4837")
 UPDATE_REPO_NAME = os.environ.get("DSP_UPDATE_REPO_NAME", "Employee-Management")
 UPDATE_BRANCH = os.environ.get("DSP_UPDATE_BRANCH", "main")

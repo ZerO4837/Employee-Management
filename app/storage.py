@@ -1268,6 +1268,13 @@ class AttendanceStore:
 
     def _ensure_attendance_cloud_id(self, table: str, row_id: int, *fallback_keys: str) -> dict:
         with self.connect() as connection:
+            # BEGIN IMMEDIATE takes the write lock before the read, so two
+            # threads ensuring a cloud_id for the same shared parent row
+            # (e.g. sibling events of one shift, pushed concurrently) can't
+            # both see an empty cloud_id and each mint a different uuid -
+            # the second one blocks until the first commits, then sees the
+            # cloud_id already set.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
             if row is None:
                 raise ValueError("Attendance row could not be found.")
