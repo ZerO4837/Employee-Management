@@ -83,6 +83,7 @@ class EmployeeApp(tk.Tk):
         self.cloud_sync_queue: queue.Queue[CloudSyncResult] = queue.Queue()
         self.cloud_sync_running = False
         self.cloud_sync_after_id: str | None = None
+        self.login_verification_queue: queue.Queue[CloudSyncResult] = queue.Queue()
 
         self._configure_style()
         self._set_window_icon()
@@ -156,6 +157,52 @@ class EmployeeApp(tk.Tk):
             self.pages[name].refresh_all()
 
     def login(self, username: str, password: str) -> None:
+        username = username.strip()
+        # The admin account has to keep working purely locally - it's the
+        # one that configures Supabase in the first place, so requiring a
+        # cloud round trip to log in would be a chicken-and-egg problem on a
+        # brand new install. Employee accounts have no such bootstrap need,
+        # and are the ones that actually get deleted/deactivated, so for
+        # them a stale local cache is a real risk worth closing.
+        is_admin_attempt = username.casefold() == ADMIN_USERNAME.casefold()
+        if is_admin_attempt or not self.load_supabase_config().can_pull_users:
+            self._complete_login(username, password)
+            return
+        self._start_login_verification(username, password)
+
+    def _start_login_verification(self, username: str, password: str) -> None:
+        login_page = self.pages.get("login")
+        if hasattr(login_page, "set_verifying"):
+            login_page.set_verifying(True)
+        worker = threading.Thread(target=self._run_login_verification_worker, daemon=True)
+        worker.start()
+        self.after(150, lambda: self._poll_login_verification(username, password))
+
+    def _run_login_verification_worker(self) -> None:
+        try:
+            result = self.cloud_sync_service.sync(push_local=False, pull_remote=True)
+        except Exception as exc:
+            result = CloudSyncResult(enabled=True, ok=False, message=f"Cloud verification failed: {exc}")
+        self.login_verification_queue.put(result)
+
+    def _poll_login_verification(self, username: str, password: str) -> None:
+        try:
+            result = self.login_verification_queue.get_nowait()
+        except queue.Empty:
+            self.after(150, lambda: self._poll_login_verification(username, password))
+            return
+        login_page = self.pages.get("login")
+        if hasattr(login_page, "set_verifying"):
+            login_page.set_verifying(False)
+        if not result.ok:
+            if hasattr(login_page, "show_login_error"):
+                login_page.show_login_error(
+                    "Could not verify your account online. Check your internet connection and try again."
+                )
+            return
+        self._complete_login(username, password)
+
+    def _complete_login(self, username: str, password: str) -> None:
         user = self.auth.verify(username, password)
         if user:
             login_page = self.pages.get("login")
@@ -170,10 +217,9 @@ class EmployeeApp(tk.Tk):
             self.show_page("admin" if self.current_role == "admin" else "dashboard")
             self.after(700, self.start_update_check)
             if self.current_role == "employee":
-                # The local account cache used for the verify() above can be
-                # stale if this account was just deleted/frozen elsewhere -
-                # pull immediately so a revoked account is caught in seconds
-                # rather than waiting for the next scheduled sync.
+                # The employee_users pull above already verified this login
+                # against the cloud, but other tables (attendance, sales,
+                # settings) haven't been pushed/pulled yet - do that now.
                 self.request_cloud_sync(push_local=False)
             return
         login_page = self.pages.get("login")

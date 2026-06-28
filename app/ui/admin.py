@@ -1737,7 +1737,7 @@ class AdminPage(tk.Frame):
                     status,
                 ),
             )
-        if self.selected_employee_username not in valid_usernames:
+        if self.selected_employee_username is not None and self.selected_employee_username not in valid_usernames:
             self.clear_employee_form()
 
     def _on_employee_selected(self, _event: tk.Event) -> None:

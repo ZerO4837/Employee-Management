@@ -448,6 +448,16 @@ class LoginPage(tk.Frame):
             self._login_clock_after_id = None
         super().destroy()
 
+    def set_verifying(self, verifying: bool) -> None:
+        if self.sign_in_button is None:
+            return
+        if verifying:
+            self.sign_in_button.configure(text="Verifying...")
+            set_button_enabled(self.sign_in_button, False)
+        else:
+            self.sign_in_button.configure(text="Unlock Workspace")
+            self._update_submit_state()
+
     def show_login_error(self, message: str) -> None:
         if self.error_panel is None or self.error_message_label is None:
             return
