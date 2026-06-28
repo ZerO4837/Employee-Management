@@ -136,30 +136,17 @@ class BrandCanvas(tk.Canvas):
             tags="brand",
         )
 
-        card_top = max(456, int(height * 0.62))
+        # card_top used to be a flat 456px floor, which doesn't shrink on a
+        # short window while the (now-removed) footer below it was anchored
+        # to height - 104, which does shrink - on a small/14" laptop screen
+        # the two collided and the cards overlapped the footer text. Anchor
+        # card_top to whatever room is actually available instead: never
+        # closer than 432px from the top content above it, and never close
+        # enough to the bottom edge to need anything below it.
+        card_top = max(432, min(int(height * 0.62), height - 108))
         card_width = max(142, (width - 146) / 2)
         self._draw_info_card(62, card_top, card_width, "SESSION", "Daily Access")
         self._draw_info_card(82 + card_width, card_top, card_width, "VIEW", "Employee Only")
-
-        self.create_line(62, height - 104, width - 62, height - 104, fill=blend(BLUE, WHITE, 0.32), width=1, tags="brand")
-        self.create_text(
-            62,
-            height - 76,
-            anchor="nw",
-            text="Workbook visibility stays controlled",
-            fill="#eff7ff",
-            font=(FONT_BOLD, 10),
-            tags="brand",
-        )
-        self.create_text(
-            62,
-            height - 52,
-            anchor="nw",
-            text="Built on your trust",
-            fill="#c7daf5",
-            font=(FONT, 9),
-            tags="brand",
-        )
 
     def _draw_info_card(self, x: float, y: float, width: float, label: str, value: str) -> None:
         self.create_rectangle(
