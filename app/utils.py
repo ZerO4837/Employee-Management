@@ -79,3 +79,24 @@ def to_cloud_timestamp(value: str) -> str:
         return text
     return parsed.astimezone().isoformat(timespec="microseconds")
 
+
+def is_timestamp_newer_or_equal(local_value: str, candidate_value: str) -> bool:
+    """True if local_value is the same moment as or later than candidate_value.
+
+    Locally generated timestamps use second precision; cloud-roundtripped
+    ones use microsecond precision (see normalize_local_timestamp above). A
+    fresh local "...:00" and its own cloud reflection "...:00.000000" are
+    the exact same moment, but as raw strings the shorter one is treated as
+    "less than" the longer one - so a same-moment value never compares as
+    equal-or-newer, only ever as stale. Comparing parsed datetimes instead
+    of strings makes this an actual chronological comparison.
+    """
+    if not local_value:
+        return False
+    if not candidate_value:
+        return True
+    try:
+        return parse_local_datetime(local_value) >= parse_local_datetime(candidate_value)
+    except ValueError:
+        return local_value >= candidate_value
+

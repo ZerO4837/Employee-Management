@@ -490,6 +490,14 @@ def make_scrollable_region(parent: tk.Misc, bg: str = BG) -> tuple[tk.Frame, tk.
 
     def _sync_width(event: tk.Event) -> None:
         canvas.itemconfigure(window_id, width=event.width)
+        # Changing the embedded window's width can reflow body's content
+        # (wraplength labels, stretch columns) and change its height, but
+        # body's own <Configure> doesn't reliably fire just because the
+        # canvas told it to resize - without this, the scrollregion can go
+        # stale at whatever size it last fired at (observed: bbox width
+        # 1166 vs. a scrollregion still configured at 787), leaving the
+        # canvas scrollable past where the real content actually ends.
+        canvas.after_idle(_sync_scrollregion)
 
     body.bind("<Configure>", _sync_scrollregion)
     canvas.bind("<Configure>", _sync_width)

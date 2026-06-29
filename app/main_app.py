@@ -29,7 +29,7 @@ from app.config import (
 )
 from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
-from app.updater import UpdateInfo, check_for_update, start_update
+from app.updater import UpdateInfo, check_for_update, download_update, install_update
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
@@ -79,6 +79,7 @@ class EmployeeApp(tk.Tk):
         self.update_check_queue: queue.Queue[UpdateInfo] = queue.Queue()
         self.update_check_started = False
         self.update_check_after_id: str | None = None
+        self.update_download_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.cloud_sync_service = CloudSyncService(self.attendance_store, self.load_supabase_config, self.auth)
         self.cloud_sync_queue: queue.Queue[CloudSyncResult] = queue.Queue()
         self.cloud_sync_running = False
@@ -437,18 +438,61 @@ class EmployeeApp(tk.Tk):
                 "A new app update is available.\n\n"
                 f"Current: {update_info.current_version}\n"
                 f"Latest: {update_info.latest_version}\n\n"
-                "Update now? The app will close to install it. A message will tell you when it's "
-                "done - reopen the app yourself afterward."
+                "Update now? This downloads the installer and launches it - the app will close "
+                "itself automatically once it's ready."
             ),
             parent=self,
         )
         if not should_update:
             return
-        started, message = start_update(update_info)
-        if not started:
-            messagebox.showwarning("Update could not start", message, parent=self)
+        self._start_update_download(update_info)
+
+    def _start_update_download(self, update_info: UpdateInfo) -> None:
+        self.title(f"{APP_NAME} - Downloading update...")
+        worker = threading.Thread(target=self._run_update_download_worker, args=(update_info,), daemon=True)
+        worker.start()
+        self._poll_update_download()
+
+    def _run_update_download_worker(self, update_info: UpdateInfo) -> None:
+        try:
+            def report_progress(downloaded: int, total: int) -> None:
+                if total:
+                    self.update_download_queue.put(("progress", int(downloaded * 100 / total)))
+
+            installer_path = download_update(update_info, progress_callback=report_progress)
+            install_update(installer_path)
+            self.update_download_queue.put(("done", None))
+        except Exception as exc:
+            self.update_download_queue.put(("error", str(exc)))
+
+    def _poll_update_download(self) -> None:
+        latest_percent: int | None = None
+        finished: tuple[str, str | None] | None = None
+        try:
+            while True:
+                kind, payload = self.update_download_queue.get_nowait()
+                if kind == "progress":
+                    latest_percent = payload
+                else:
+                    finished = (kind, payload)
+        except queue.Empty:
+            pass
+        if finished is None:
+            if latest_percent is not None:
+                self.title(f"{APP_NAME} - Downloading update... {latest_percent}%")
+            self.after(250, self._poll_update_download)
             return
-        self._finish_close_app()
+        kind, payload = finished
+        if kind == "done":
+            # Don't close the window here - /CLOSEAPPLICATIONS on the
+            # installer we just launched asks Windows to close this app for
+            # us, which arrives through the normal WM_DELETE_WINDOW handler
+            # (close_app) exactly like the user clicking the close button,
+            # including its "finish the in-flight Excel sync first" wait.
+            self.title(f"{APP_NAME} - Update launching...")
+            return
+        self.title(APP_NAME)
+        messagebox.showwarning("Update could not start", payload or "Unknown error.", parent=self)
 
     def load_sales_workbook_settings(self) -> None:
         workbook_path = self.attendance_store.get_setting("sales_workbook_path", "")

@@ -5,12 +5,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
-import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 
-from app.config import APP_VERSION, BASE_DIR, UPDATE_REPO_NAME, UPDATE_REPO_OWNER
+from app.config import APP_VERSION, UPDATE_REPO_NAME, UPDATE_REPO_OWNER
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,17 @@ class UpdateInfo:
     asset: ReleaseAsset | None = None
     message: str = ""
     can_update: bool = False
+
+
+# A freshly downloaded, unsigned .exe is exactly what Windows Defender/
+# SmartScreen scans hardest before releasing its lock - on a slow link or a
+# build hash it has never seen, that scan can run well past ten seconds.
+# This retries on the specific access-denied symptom with a generous
+# budget rather than failing the whole update over a transient lock.
+LOCK_RETRY_TOTAL_SECONDS = 300.0
+LOCK_RETRY_INITIAL_DELAY = 2.0
+LOCK_RETRY_MAX_DELAY = 20.0
+LOCK_RETRY_BACKOFF = 1.6
 
 
 def _startupinfo():
@@ -73,10 +86,6 @@ def _asset_priority(name: str) -> int:
             return 0
         if lower.endswith(".msi"):
             return 1
-        if lower.endswith(".zip"):
-            return 2
-    if lower.endswith(".zip"):
-        return 3
     return 99
 
 
@@ -114,7 +123,7 @@ def check_for_update() -> UpdateInfo:
             available=True,
             latest_version=latest_version,
             release_url=release_url,
-            message="Latest release has no .exe, .msi, or .zip asset.",
+            message="Latest release has no .exe or .msi asset.",
             can_update=False,
         )
     return UpdateInfo(
@@ -126,43 +135,99 @@ def check_for_update() -> UpdateInfo:
     )
 
 
-def start_update(update_info: UpdateInfo, repo_root: Path = BASE_DIR) -> tuple[bool, str]:
+def _downloads_dir() -> Path:
+    # A stable, known location (not an auto-deleted TemporaryDirectory) so
+    # that if the install step ever fails, the installer survives for the
+    # user to run manually instead of vanishing along with the temp dir.
+    directory = Path(tempfile.gettempdir()) / "DSPEmployeeUpdates"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _clear_directory(directory: Path) -> None:
+    for child in directory.iterdir():
+        try:
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def download_update(update_info: UpdateInfo, progress_callback=None, timeout: int = 120) -> Path:
     if update_info.asset is None:
-        return False, update_info.message or "No downloadable update asset was found."
+        raise ValueError("No downloadable update asset was found.")
 
-    if getattr(sys, "frozen", False):
-        # A frozen exe is not a python.exe stand-in - it never parses "-m
-        # module" - so it must be told via our own flag to run the updater
-        # instead of just launching another copy of the app (which is what
-        # silently happened before: the app appeared to "restart" while no
-        # update logic ever ran).
-        updater_prefix = [sys.executable, "--run-update-runner"]
-    else:
-        updater_prefix = [sys.executable, "-m", "app.update_runner"]
+    download_dir = _downloads_dir()
+    _clear_directory(download_dir)
+    safe_name = Path(update_info.asset.name).name or "update_asset"
+    target_path = download_dir / safe_name
 
-    command = [
-        *updater_prefix,
-        "--app-dir",
-        str(repo_root),
-        "--pid",
-        str(os.getpid()),
-        "--asset-url",
+    request = urllib.request.Request(
         update_info.asset.download_url,
-        "--asset-name",
-        update_info.asset.name,
-    ]
-    creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    subprocess.Popen(
-        command,
-        cwd=str(repo_root),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        startupinfo=_startupinfo(),
-        creationflags=creationflags,
+        headers={"User-Agent": "Digital-Service-Pakistan-Employee-App"},
     )
-    return (
-        True,
-        "Updater started. The app will close now. This can take a few minutes - reopen the app "
-        "yourself once you see the update-complete message.",
-    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        total = int(response.headers.get("Content-Length", "0") or 0)
+        downloaded = 0
+        with target_path.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 128)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    progress_callback(downloaded, total)
+
+    actual_size = target_path.stat().st_size
+    if total and actual_size != total:
+        raise OSError(f"Download incomplete: expected {total} bytes, got {actual_size}.")
+    return target_path
+
+
+def _is_access_denied(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == 5 or exc.errno == 13
+
+
+def install_update(installer_path: Path) -> subprocess.Popen:
+    """Launch the installer directly, the same way the reference project does.
+
+    No separate updater process and no "wait for this app to exit first" -
+    /CLOSEAPPLICATIONS (paired with CloseApplications=yes in the .iss) tells
+    Inno Setup to close the running app itself as part of installing, which
+    routes through this app's own WM_DELETE_WINDOW handler (close_app) like
+    a normal close, including its "finish the in-flight Excel sync first"
+    wait - rather than this code trying to orchestrate that sequencing
+    itself in a second process.
+    """
+    suffix = installer_path.suffix.lower()
+    if suffix == ".msi":
+        command = ["msiexec", "/i", str(installer_path), "/passive"]
+    else:
+        command = [
+            str(installer_path),
+            "/SP-",
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/CLOSEAPPLICATIONS",
+        ]
+
+    deadline = time.monotonic() + LOCK_RETRY_TOTAL_SECONDS
+    delay = LOCK_RETRY_INITIAL_DELAY
+    while True:
+        try:
+            return subprocess.Popen(command, startupinfo=_startupinfo(), close_fds=True)
+        except OSError as exc:
+            if not _is_access_denied(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OSError(
+                    f"Installer stayed locked for over {int(LOCK_RETRY_TOTAL_SECONDS)} seconds "
+                    f"(most likely antivirus scanning) - giving up: {exc}"
+                ) from exc
+            time.sleep(min(delay, remaining))
+            delay = min(delay * LOCK_RETRY_BACKOFF, LOCK_RETRY_MAX_DELAY)

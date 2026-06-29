@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 
 from app.config import SALES_SERVICE_NAMES
-from app.utils import normalize_local_timestamp, parse_local_datetime
+from app.utils import is_timestamp_newer_or_equal, normalize_local_timestamp, parse_local_datetime
 
 
 def _now() -> datetime:
@@ -725,7 +725,7 @@ class AttendanceStore:
             ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
             connection.execute(
                 """
@@ -1377,7 +1377,7 @@ class AttendanceStore:
                 ).fetchone()
             if existing is not None:
                 local_updated = self._attendance_updated_at(existing, "ended_at", "started_at")
-                if existing["cloud_id"] == cloud_id and local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if existing["cloud_id"] == cloud_id and is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -1451,7 +1451,7 @@ class AttendanceStore:
                 ).fetchone()
             if existing is not None:
                 local_updated = self._attendance_updated_at(existing, "ended_at", "started_at")
-                if existing["cloud_id"] == cloud_id and local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if existing["cloud_id"] == cloud_id and is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -1535,7 +1535,7 @@ class AttendanceStore:
             existing = connection.execute("SELECT * FROM attendance_day_events WHERE cloud_id = ?", (cloud_id,)).fetchone()
             if existing is not None:
                 local_updated = self._attendance_updated_at(existing, "event_time")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -1617,7 +1617,7 @@ class AttendanceStore:
             existing = connection.execute("SELECT * FROM attendance_events WHERE cloud_id = ?", (cloud_id,)).fetchone()
             if existing is not None:
                 local_updated = self._attendance_updated_at(existing, "event_time")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -1903,7 +1903,7 @@ class AttendanceStore:
             ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or existing["created_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -2156,7 +2156,7 @@ class AttendanceStore:
                 ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or existing["created_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -2385,7 +2385,7 @@ class AttendanceStore:
             ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or existing["created_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -2520,7 +2520,7 @@ class AttendanceStore:
             ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or existing["created_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """
@@ -3046,7 +3046,7 @@ class AttendanceStore:
             ).fetchone()
             if existing is not None:
                 local_updated = str(existing["updated_at"] or "")
-                if local_updated >= updated_at and not existing["cloud_sync_error"]:
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
                     return False
                 connection.execute(
                     """

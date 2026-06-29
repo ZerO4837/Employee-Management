@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.config import ADMIN_PASSWORD, ADMIN_USERNAME, DEFAULT_PASSWORD, DEFAULT_USERNAME, RESET_CODE
-from app.utils import normalize_local_timestamp
+from app.utils import is_timestamp_newer_or_equal, normalize_local_timestamp
 
 
 HASH_ITERATIONS = 260_000
@@ -461,7 +461,7 @@ class AuthStore:
                 continue
             updated_at = str(user.get("updated_at", ""))
             cloud_synced_at = str(user.get("cloud_synced_at", ""))
-            if cloud_synced_at and cloud_synced_at >= updated_at and not user.get("cloud_sync_error"):
+            if cloud_synced_at and is_timestamp_newer_or_equal(cloud_synced_at, updated_at) and not user.get("cloud_sync_error"):
                 continue
             item = dict(user)
             item["username_key"] = key
@@ -497,7 +497,7 @@ class AuthStore:
         updated_at = normalize_local_timestamp(str(item.get("updated_at") or _now()))
         if existing is not None:
             local_updated = str(existing.get("updated_at", ""))
-            if local_updated >= updated_at and not existing.get("cloud_sync_error"):
+            if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing.get("cloud_sync_error"):
                 return False
         is_deleted = _as_bool(item.get("is_deleted", False), False)
         now = _now()
