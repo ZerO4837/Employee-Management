@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from datetime import datetime
 import os
 import queue
 import threading
@@ -201,6 +202,7 @@ class EmployeeApp(tk.Tk):
                     "Could not verify your account online. Check your internet connection and try again."
                 )
             return
+        self._record_successful_sync()
         self._complete_login(username, password)
 
     def _complete_login(self, username: str, password: str) -> None:
@@ -230,7 +232,7 @@ class EmployeeApp(tk.Tk):
                     "Your account is not active. Please contact the admin to reactivate your employee access."
                 )
             elif username.strip() and self.auth.get_user(username) is None:
-                login_page.show_login_error("User not found. Please contact the admin.")
+                login_page.show_login_error("User not found. Please contact the admin." + self._last_successful_sync_note())
             else:
                 bootstrap_path = AUTH_CONFIG_PATH.parent / BOOTSTRAP_FILENAME
                 if username.strip().casefold() == ADMIN_USERNAME.casefold() and self.auth.has_bootstrap_secret("Admin password"):
@@ -348,6 +350,8 @@ class EmployeeApp(tk.Tk):
     def _handle_cloud_sync_result(self, result: CloudSyncResult) -> None:
         if not result.enabled:
             return
+        if result.ok:
+            self._record_successful_sync()
         page = self.pages.get(getattr(self, "current_page", ""))
         if result.changed:
             # A pulled setting (e.g. the sales workbook target) only takes
@@ -383,6 +387,25 @@ class EmployeeApp(tk.Tk):
         self._enforce_current_employee_account_status()
         if isinstance(page, AdminPage) and hasattr(page, "set_cloud_sync_status"):
             page.set_cloud_sync_status(result.message, ok=result.ok)
+
+    def _record_successful_sync(self) -> None:
+        try:
+            self.attendance_store.set_setting("last_successful_sync_at", datetime.now().isoformat(timespec="seconds"))
+        except Exception:
+            pass
+
+    def _last_successful_sync_note(self) -> str:
+        # Surfaced in "user not found"-type login errors so a PC whose
+        # cloud sync has been silently failing is obvious from the error
+        # message itself, instead of needing remote investigation to find
+        # out the account simply never reached this machine.
+        try:
+            last_sync = self.attendance_store.get_setting("last_successful_sync_at", "")
+        except Exception:
+            last_sync = ""
+        if last_sync:
+            return f"\n\n(This PC last synced with the cloud successfully at: {last_sync})"
+        return "\n\n(This PC has never successfully synced with the cloud.)"
 
     def _enforce_current_employee_account_status(self) -> None:
         if self.current_role != "employee" or not self.current_user:

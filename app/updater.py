@@ -155,36 +155,51 @@ def _clear_directory(directory: Path) -> None:
             pass
 
 
+DOWNLOAD_MAX_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAYS = (2.0, 4.0)
+
+
 def download_update(update_info: UpdateInfo, progress_callback=None, timeout: int = 120) -> Path:
     if update_info.asset is None:
         raise ValueError("No downloadable update asset was found.")
 
     download_dir = _downloads_dir()
-    _clear_directory(download_dir)
     safe_name = Path(update_info.asset.name).name or "update_asset"
     target_path = download_dir / safe_name
 
-    request = urllib.request.Request(
-        update_info.asset.download_url,
-        headers={"User-Agent": "Digital-Service-Pakistan-Employee-App"},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        total = int(response.headers.get("Content-Length", "0") or 0)
-        downloaded = 0
-        with target_path.open("wb") as output:
-            while True:
-                chunk = response.read(1024 * 128)
-                if not chunk:
-                    break
-                output.write(chunk)
-                downloaded += len(chunk)
-                if progress_callback:
-                    progress_callback(downloaded, total)
+    last_exc: Exception | None = None
+    for attempt in range(DOWNLOAD_MAX_ATTEMPTS):
+        if attempt:
+            time.sleep(DOWNLOAD_RETRY_DELAYS[min(attempt - 1, len(DOWNLOAD_RETRY_DELAYS) - 1)])
+        _clear_directory(download_dir)
+        try:
+            request = urllib.request.Request(
+                update_info.asset.download_url,
+                headers={"User-Agent": "Digital-Service-Pakistan-Employee-App"},
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                total = int(response.headers.get("Content-Length", "0") or 0)
+                downloaded = 0
+                with target_path.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 128)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, total)
 
-    actual_size = target_path.stat().st_size
-    if total and actual_size != total:
-        raise OSError(f"Download incomplete: expected {total} bytes, got {actual_size}.")
-    return target_path
+            actual_size = target_path.stat().st_size
+            if total and actual_size != total:
+                raise OSError(f"Download incomplete: expected {total} bytes, got {actual_size}.")
+            return target_path
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            last_exc = exc
+
+    raise OSError(
+        f"Download failed after {DOWNLOAD_MAX_ATTEMPTS} attempts. Last error: {last_exc}"
+    ) from last_exc
 
 
 def _is_access_denied(exc: OSError) -> bool:
