@@ -22,6 +22,7 @@ from app.config import (
     APP_DB_PATH,
     APP_ICON_PATH,
     APP_NAME,
+    APP_VERSION,
     AUTH_CONFIG_PATH,
     BG,
     DEFAULT_USERNAME,
@@ -30,7 +31,7 @@ from app.config import (
 )
 from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
-from app.updater import UpdateInfo, check_for_update, download_update, install_update
+from app.updater import UpdateInfo, _is_newer, check_for_update, download_update, install_update
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
@@ -484,11 +485,17 @@ class EmployeeApp(tk.Tk):
                     self.update_download_queue.put(("progress", int(downloaded * 100 / total)))
 
             installer_path = download_update(update_info, progress_callback=report_progress)
-            install_update(installer_path)
+            # Persist the "an update is being applied" flag BEFORE launching
+            # the installer. /CLOSEAPPLICATIONS can close this app at any point
+            # after the installer starts, so writing the flag first guarantees
+            # it survives even if we get closed mid-handoff. The next launch
+            # only honours it once actually running that target version, so a
+            # failed install that restarts the old version won't false-fire.
             try:
                 self.attendance_store.set_setting("pending_update_notification", update_info.latest_version)
             except Exception:
                 pass
+            install_update(installer_path)
             self.update_download_queue.put(("done", None))
         except Exception as exc:
             self.update_download_queue.put(("error", str(exc)))
@@ -523,16 +530,39 @@ class EmployeeApp(tk.Tk):
         messagebox.showwarning("Update could not start", payload or "Unknown error.", parent=self)
 
     def _check_update_notification(self) -> None:
+        # Show a one-time "you've been updated" confirmation on the first
+        # launch after an update. Two independent signals are honoured so a
+        # single missed signal can't swallow the message:
+        #   1. pending_update_notification - an explicit flag written by the
+        #      previous version while it applied an update (precise, fires on
+        #      the very next update from a version that has the flag code).
+        #   2. last_run_version - the version that ran here last time; if the
+        #      version we're now running is newer, an update clearly happened
+        #      even if no flag was written (e.g. a manual install of a newer
+        #      build, or a version too old to have written the flag).
         try:
-            version = self.attendance_store.get_setting("pending_update_notification", "")
-            if not version:
-                return
-            self.attendance_store.set_setting("pending_update_notification", "")
-            self.after(2000, lambda: messagebox.showinfo(
-                "App Updated Successfully",
-                f"The app has been updated to version {version}.\n\nYou're now on the latest version!",
-                parent=self,
-            ))
+            flagged_version = self.attendance_store.get_setting("pending_update_notification", "")
+            previous_version = self.attendance_store.get_setting("last_run_version", "")
+            # Record what we're running now for the next launch's comparison.
+            self.attendance_store.set_setting("last_run_version", APP_VERSION)
+
+            should_notify = False
+            if flagged_version and not _is_newer(flagged_version, APP_VERSION):
+                # We've actually reached (or passed) the flagged target, so
+                # the update genuinely completed - not a failed install that
+                # dropped us back onto the old version.
+                self.attendance_store.set_setting("pending_update_notification", "")
+                should_notify = True
+            elif previous_version and _is_newer(APP_VERSION, previous_version):
+                should_notify = True
+
+            if should_notify:
+                self.after(1500, lambda: messagebox.showinfo(
+                    "App Updated Successfully",
+                    f"The application has been updated to version {APP_VERSION}.\n\n"
+                    "You're now running the latest version.",
+                    parent=self,
+                ))
         except Exception:
             pass
 
