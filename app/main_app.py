@@ -91,6 +91,7 @@ class EmployeeApp(tk.Tk):
         self._set_window_icon()
         self._build_pages()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
+        self._check_update_notification()
         self.show_page("login")
         self._schedule_cloud_sync(3000)
 
@@ -484,6 +485,10 @@ class EmployeeApp(tk.Tk):
 
             installer_path = download_update(update_info, progress_callback=report_progress)
             install_update(installer_path)
+            try:
+                self.attendance_store.set_setting("pending_update_notification", update_info.latest_version)
+            except Exception:
+                pass
             self.update_download_queue.put(("done", None))
         except Exception as exc:
             self.update_download_queue.put(("error", str(exc)))
@@ -516,6 +521,20 @@ class EmployeeApp(tk.Tk):
             return
         self.title(APP_NAME)
         messagebox.showwarning("Update could not start", payload or "Unknown error.", parent=self)
+
+    def _check_update_notification(self) -> None:
+        try:
+            version = self.attendance_store.get_setting("pending_update_notification", "")
+            if not version:
+                return
+            self.attendance_store.set_setting("pending_update_notification", "")
+            self.after(2000, lambda: messagebox.showinfo(
+                "App Updated Successfully",
+                f"The app has been updated to version {version}.\n\nYou're now on the latest version!",
+                parent=self,
+            ))
+        except Exception:
+            pass
 
     def load_sales_workbook_settings(self) -> None:
         workbook_path = self.attendance_store.get_setting("sales_workbook_path", "")
