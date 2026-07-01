@@ -4,6 +4,7 @@ import ctypes
 from datetime import datetime
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -31,7 +32,7 @@ from app.config import (
 )
 from app.excel_sales import SalesWorkbook
 from app.storage import AttendanceStore
-from app.updater import UpdateInfo, _is_newer, check_for_update, download_update, install_update
+from app.updater import UpdateInfo, check_for_update, download_update, install_update
 from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
@@ -92,7 +93,6 @@ class EmployeeApp(tk.Tk):
         self._set_window_icon()
         self._build_pages()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
-        self._check_update_notification()
         self.show_page("login")
         self._schedule_cloud_sync(3000)
 
@@ -485,16 +485,6 @@ class EmployeeApp(tk.Tk):
                     self.update_download_queue.put(("progress", int(downloaded * 100 / total)))
 
             installer_path = download_update(update_info, progress_callback=report_progress)
-            # Persist the "an update is being applied" flag BEFORE launching
-            # the installer. /CLOSEAPPLICATIONS can close this app at any point
-            # after the installer starts, so writing the flag first guarantees
-            # it survives even if we get closed mid-handoff. The next launch
-            # only honours it once actually running that target version, so a
-            # failed install that restarts the old version won't false-fire.
-            try:
-                self.attendance_store.set_setting("pending_update_notification", update_info.latest_version)
-            except Exception:
-                pass
             install_update(installer_path)
             self.update_download_queue.put(("done", None))
         except Exception as exc:
@@ -529,43 +519,6 @@ class EmployeeApp(tk.Tk):
         self.title(APP_NAME)
         messagebox.showwarning("Update could not start", payload or "Unknown error.", parent=self)
 
-    def _check_update_notification(self) -> None:
-        # Show a one-time "you've been updated" confirmation on the first
-        # launch after an update. Two independent signals are honoured so a
-        # single missed signal can't swallow the message:
-        #   1. pending_update_notification - an explicit flag written by the
-        #      previous version while it applied an update (precise, fires on
-        #      the very next update from a version that has the flag code).
-        #   2. last_run_version - the version that ran here last time; if the
-        #      version we're now running is newer, an update clearly happened
-        #      even if no flag was written (e.g. a manual install of a newer
-        #      build, or a version too old to have written the flag).
-        try:
-            flagged_version = self.attendance_store.get_setting("pending_update_notification", "")
-            previous_version = self.attendance_store.get_setting("last_run_version", "")
-            # Record what we're running now for the next launch's comparison.
-            self.attendance_store.set_setting("last_run_version", APP_VERSION)
-
-            should_notify = False
-            if flagged_version and not _is_newer(flagged_version, APP_VERSION):
-                # We've actually reached (or passed) the flagged target, so
-                # the update genuinely completed - not a failed install that
-                # dropped us back onto the old version.
-                self.attendance_store.set_setting("pending_update_notification", "")
-                should_notify = True
-            elif previous_version and _is_newer(APP_VERSION, previous_version):
-                should_notify = True
-
-            if should_notify:
-                self.after(1500, lambda: messagebox.showinfo(
-                    "App Updated Successfully",
-                    f"The application has been updated to version {APP_VERSION}.\n\n"
-                    "You're now running the latest version.",
-                    parent=self,
-                ))
-        except Exception:
-            pass
-
     def load_sales_workbook_settings(self) -> None:
         workbook_path = self.attendance_store.get_setting("sales_workbook_path", "")
         worksheet_name = self.attendance_store.get_setting("sales_worksheet_name", SALES_WORKSHEET_NAME)
@@ -585,6 +538,38 @@ class EmployeeApp(tk.Tk):
         return self.current_display_name or self.current_user or DEFAULT_USERNAME
 
 
+def _show_update_notice() -> None:
+    """Standalone "update finished" popup shown on the desktop by the
+    installer right after a silent auto-update, before the user reopens the
+    app. It deliberately does NOT build the full app (no DB, no cloud, no
+    login) - it only needs a bare Tk root to host a single message box, so
+    it appears near-instantly and closes cleanly on its own.
+    """
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    if APP_ICON_PATH.exists():
+        try:
+            root.iconbitmap(str(APP_ICON_PATH))
+        except tk.TclError:
+            pass
+    messagebox.showinfo(
+        "Update Complete",
+        f"{APP_NAME} has been updated to version {APP_VERSION}.\n\n"
+        "Please reopen the app to continue.",
+        parent=root,
+    )
+    root.destroy()
+
+
 def main() -> None:
+    # Launched by the installer (see the .iss [Run] entry) purely to show the
+    # "update complete, please reopen" desktop alert after a silent update.
+    if "--update-notice" in sys.argv:
+        _show_update_notice()
+        return
     app = EmployeeApp()
     app.mainloop()

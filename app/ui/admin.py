@@ -722,6 +722,9 @@ class AdminPage(tk.Frame):
         ann_scroll = ttk.Scrollbar(recent, orient="vertical", command=self.announcements_tree.yview)
         ann_scroll.grid(row=1, column=1, sticky="ns")
         self.announcements_tree.configure(yscrollcommand=ann_scroll.set)
+        make_button(recent, "Remove Selected Notification", self.remove_selected_announcement, "danger").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0)
+        )
 
     def _active_service_names(self, include_other: bool = True) -> list[str]:
         return self.app.attendance_store.list_service_names(include_other=include_other)
@@ -1924,6 +1927,30 @@ class AdminPage(tk.Frame):
             "success",
         )
 
+    def remove_selected_announcement(self) -> None:
+        selection = self.announcements_tree.selection()
+        if not selection:
+            show_app_alert(self, "No notification selected", "Select a notification from the list first.", "warning")
+            return
+        announcement_id = int(selection[0])
+        values = self.announcements_tree.item(selection[0], "values")
+        title = values[2] if values and len(values) > 2 else "this notification"
+        if not messagebox.askyesno(
+            "Remove notification",
+            f"Remove '{title}' so employees no longer see it?",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.deactivate_announcement(announcement_id)
+        self.refresh_all()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(
+            self,
+            "Notification removed",
+            "Employees will no longer see this notification.",
+            "success",
+        )
+
     def save_message_template(self) -> None:
         service_name = self._resolved_template_service()
         message = self.template_message_text.get("1.0", tk.END).strip()
@@ -2352,11 +2379,14 @@ class AdminPage(tk.Frame):
     def _refresh_announcements(self) -> None:
         for item in self.announcements_tree.get_children():
             self.announcements_tree.delete(item)
-        announcements = self.app.attendance_store.list_announcements(limit=40)
+        # active_only so a removed notification drops out of the admin's own
+        # list too - not just the employees' - once it's been deactivated.
+        announcements = self.app.attendance_store.list_announcements(limit=40, active_only=True)
         for announcement in announcements:
             self.announcements_tree.insert(
                 "",
                 "end",
+                iid=str(announcement["id"]),
                 values=(
                     self._format_time(announcement["created_at"]),
                     announcement["category"],

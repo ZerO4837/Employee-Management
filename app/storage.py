@@ -1811,6 +1811,25 @@ class AttendanceStore:
                 tuple(normalized_aliases),
             )
 
+    def deactivate_announcement(self, announcement_id: int) -> None:
+        # Soft delete: flip is_active off and bump updated_at so the change is
+        # picked up as pending and pushed to the cloud, which then propagates
+        # to employee PCs on their next pull (their list/badge queries all
+        # filter is_active = 1, so it disappears for them too). A hard DELETE
+        # would only remove the local row and never tell other PCs to drop it.
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE announcements
+                SET is_active = 0,
+                    updated_at = ?,
+                    cloud_synced_at = '',
+                    cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (_iso(), announcement_id),
+            )
+
     def list_cloud_pending_announcements(self, limit: int = 100) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(

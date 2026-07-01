@@ -38,3 +38,15 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent unchecked
+; Silent auto-updates run with /VERYSILENT, so the wizard's own "completed"
+; page never shows. This launches the app in a lightweight notice-only mode
+; to pop a desktop "update complete, please reopen" alert. Gated to silent
+; runs so a normal manual (wizard) install - which already has its own
+; completion page and Launch checkbox above - doesn't double up.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--update-notice"; Flags: nowait; Check: IsSilentUpdate
+
+[Code]
+function IsSilentUpdate(): Boolean;
+begin
+  Result := WizardSilent();
+end;
