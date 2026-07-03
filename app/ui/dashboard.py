@@ -2605,16 +2605,23 @@ class EditEntryWindow(tk.Toplevel):
             self.iconphoto(False, logo)
 
     def _configure_window_geometry(self) -> None:
-        # A fixed 760x560 used to clip the Save/Cancel row whenever the
-        # conditional "Other Service Name"/"Other Status Reason" fields were
-        # showing, or on a shorter screen. The form area now scrolls on its
-        # own (see _build), so this only needs to pick a sane starting size,
-        # not guarantee every field fits without scrolling.
+        # Size the window to what the form actually needs, capped to the
+        # visible screen. A fixed 760x560 could open with its bottom
+        # (Save/Cancel) or right edge cut off on smaller or display-scaled
+        # employee screens. The form area scrolls on its own (see _build),
+        # so capping short of the full content is always safe - nothing
+        # becomes unreachable, it just scrolls.
+        self.update_idletasks()
+        screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
-        width = 760
-        height = min(560, max(420, screen_height - 160))
+        # Chrome around the content: the panel's pack padding (20 per side),
+        # the scrollbar column, and the card border/accent.
+        required_width = self.form_body.winfo_reqwidth() + 64
+        required_height = self.form_body.winfo_reqheight() + self.actions_frame.winfo_reqheight() + 70
+        width = min(max(required_width, 700), screen_width - 60)
+        height = min(max(required_height, 440), screen_height - 130)
         self.geometry(f"{width}x{height}")
-        self.minsize(700, min(420, height))
+        self.minsize(min(640, width), min(400, height))
 
     def _build(self) -> None:
         panel = SurfaceCard(self, padx=0, pady=0, accent=True, accent_start=BLUE, accent_end=TEAL)
@@ -2633,6 +2640,9 @@ class EditEntryWindow(tk.Toplevel):
         scroll_container.grid(row=0, column=0, sticky="nsew")
         body.configure(padx=24, pady=22)
         body.grid_columnconfigure((0, 1), weight=1)
+        # Kept so _configure_window_geometry can size the window to the
+        # form's real requested size instead of a hardcoded guess.
+        self.form_body = body
 
         tk.Label(body, text=f"Edit Entry #{self.display_number}", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 18)
@@ -2648,11 +2658,16 @@ class EditEntryWindow(tk.Toplevel):
         self._item_other_field(body, row + 2, 1)
         self._status_other_field(body, row + 4, 0)
 
-        actions = tk.Frame(outer, bg=WHITE, padx=24, pady=(10, 22))
-        actions.grid(row=1, column=0, sticky="ew")
+        # NOTE: a widget's own padx/pady only accepts a single distance -
+        # a (top, bottom) tuple here is a TclError that aborted _build
+        # halfway, which is why the window used to open half-built with no
+        # Save/Cancel row. Asymmetric padding belongs on grid() instead.
+        actions = tk.Frame(outer, bg=WHITE, padx=24)
+        actions.grid(row=1, column=0, sticky="ew", pady=(10, 22))
         actions.grid_columnconfigure((0, 1), weight=1)
         make_button(actions, "Save Changes", self.save, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 8))
         make_button(actions, "Cancel", self.destroy, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.actions_frame = actions
 
     def _field(
         self,
@@ -2704,8 +2719,16 @@ class EditEntryWindow(tk.Toplevel):
         # fallback here would just undo that on a shorter screen.
         width = self.winfo_width()
         height = self.winfo_height()
-        x_position = parent.winfo_rootx() + max((parent.winfo_width() - width) // 2, 0)
-        y_position = parent.winfo_rooty() + max((parent.winfo_height() - height) // 2, 0)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x_position = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y_position = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        # Clamp fully on-screen (with a taskbar allowance at the bottom):
+        # centering on the parent alone can push the bottom of this window
+        # below the visible desktop when the parent sits low on a small
+        # screen, which is exactly how Save/Cancel ended up unreachable.
+        x_position = max(0, min(x_position, screen_width - width))
+        y_position = max(0, min(y_position, screen_height - height - 50))
         self.geometry(f"{width}x{height}+{x_position}+{y_position}")
 
     def _status_other_field(self, parent: tk.Misc, row: int, column: int) -> None:

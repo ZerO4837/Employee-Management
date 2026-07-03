@@ -83,6 +83,7 @@ class EmployeeApp(tk.Tk):
         self.update_check_started = False
         self.update_check_after_id: str | None = None
         self.update_download_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.update_download_in_progress = False
         self.cloud_sync_service = CloudSyncService(self.attendance_store, self.load_supabase_config, self.auth)
         self.cloud_sync_queue: queue.Queue[CloudSyncResult] = queue.Queue()
         self.cloud_sync_running = False
@@ -95,6 +96,12 @@ class EmployeeApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.show_page("login")
         self._schedule_cloud_sync(3000)
+        # Check for updates as soon as the app opens (not only after login),
+        # so an update that was interrupted - app closed mid-download, or
+        # internet dropped - is offered again on the very next launch.
+        # start_update_check guards itself against running twice, so the
+        # post-login call stays harmless.
+        self.after(2500, self.start_update_check)
 
     def _configure_window_geometry(self) -> None:
         screen_width = self.winfo_screenwidth()
@@ -252,6 +259,21 @@ class EmployeeApp(tk.Tk):
         self.show_page("login")
 
     def close_app(self) -> None:
+        if self.update_download_in_progress:
+            still_close = messagebox.askyesno(
+                "Update in progress",
+                (
+                    "An app update is downloading right now - please wait, it only "
+                    "takes a moment.\n\n"
+                    "Do you still want to close the app? The update will start again "
+                    "the next time the app is opened."
+                ),
+                icon="warning",
+                default="no",
+                parent=self,
+            )
+            if not still_close:
+                return
         dashboard = self.pages.get("dashboard")
         if (
             isinstance(dashboard, DashboardPage)
@@ -473,6 +495,7 @@ class EmployeeApp(tk.Tk):
         self._start_update_download(update_info)
 
     def _start_update_download(self, update_info: UpdateInfo) -> None:
+        self.update_download_in_progress = True
         self.title(f"{APP_NAME} - Downloading update...")
         worker = threading.Thread(target=self._run_update_download_worker, args=(update_info,), daemon=True)
         worker.start()
@@ -508,6 +531,11 @@ class EmployeeApp(tk.Tk):
             self.after(250, self._poll_update_download)
             return
         kind, payload = finished
+        # Cleared on BOTH outcomes before anything else: once the installer
+        # is launched ("done"), the installer itself closes this app via
+        # /CLOSEAPPLICATIONS - that close arrives through close_app and must
+        # NOT be blocked by the "update in progress" warning prompt.
+        self.update_download_in_progress = False
         if kind == "done":
             # Don't close the window here - /CLOSEAPPLICATIONS on the
             # installer we just launched asks Windows to close this app for

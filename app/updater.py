@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import http.client
 import json
 import os
 from pathlib import Path
@@ -194,7 +195,10 @@ def download_update(update_info: UpdateInfo, progress_callback=None, timeout: in
             if total and actual_size != total:
                 raise OSError(f"Download incomplete: expected {total} bytes, got {actual_size}.")
             return target_path
-        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+        except (OSError, urllib.error.URLError, TimeoutError, http.client.HTTPException) as exc:
+            # HTTPException covers mid-stream disconnects (IncompleteRead)
+            # that aren't OSError subclasses - without it, pulling the
+            # network cable mid-download would crash past the retry loop.
             last_exc = exc
 
     raise OSError(
