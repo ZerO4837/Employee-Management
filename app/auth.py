@@ -7,8 +7,8 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
-from app.config import ADMIN_PASSWORD, ADMIN_USERNAME, DEFAULT_PASSWORD, DEFAULT_USERNAME, RESET_CODE
-from app.utils import is_timestamp_newer_or_equal, normalize_local_timestamp
+from app.config import ADMIN_PASSWORD, ADMIN_USERNAME, RESET_CODE
+from app.utils import is_future_timestamp, is_timestamp_newer_or_equal, normalize_local_timestamp
 
 
 HASH_ITERATIONS = 260_000
@@ -65,6 +65,7 @@ class AuthStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.data = self._load()
+        self._heal_future_timestamps()
 
     def _bootstrap_password(self, configured_password: str, label: str) -> tuple[str, bool]:
         if configured_password:
@@ -129,20 +130,16 @@ class AuthStore:
         return bool(self._read_bootstrap_secret(label))
 
     def _default_data(self) -> dict:
-        employee_password, _ = self._bootstrap_password(DEFAULT_PASSWORD, "Employee password")
+        # Only the admin account is seeded locally. Employee accounts must
+        # come from the admin panel or the cloud pull - auto-creating a
+        # default employee here gave every fresh install a local user named
+        # DEFAULT_USERNAME with an unknown random password, which then
+        # collided with (and could shadow or overwrite) the REAL cloud
+        # account of the same name during sync.
         admin_password, _ = self._bootstrap_password(ADMIN_PASSWORD, "Admin password")
         reset_code = self._bootstrap_reset_code()
         return {
             "users": {
-                DEFAULT_USERNAME.lower(): {
-                    "username": DEFAULT_USERNAME,
-                    "display_name": DEFAULT_USERNAME,
-                    "role": "employee",
-                    "is_active": True,
-                    "password_hash": hash_password(employee_password),
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                },
                 ADMIN_USERNAME.lower(): {
                     "username": ADMIN_USERNAME,
                     "display_name": "Admin",
@@ -227,6 +224,38 @@ class AuthStore:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+
+    def _heal_future_timestamps(self) -> None:
+        """Repair rows whose timestamps drifted days into the future.
+
+        The old naive-timezone push bug left records (both local and in the
+        cloud) stamped up to weeks ahead of real time. Such a row always
+        looks "newer" than any legitimate edit, so it can never be replaced
+        - a deleted-user tombstone stamped in the future silently kills
+        every re-add of that username - and because its updated_at stays
+        ahead of cloud_synced_at forever, it also re-pushes itself to the
+        cloud on every sync cycle, re-poisoning other PCs.
+
+        Rewinding updated_at to the last successful sync time (the newest
+        locally-generated timestamp known for the row) makes the row lose
+        against any genuinely newer cloud state on the next pull, and stops
+        the endless re-push loop.
+        """
+        changed = False
+        for user in self.data.get("users", {}).values():
+            if not is_future_timestamp(str(user.get("updated_at", ""))):
+                continue
+            sane = str(user.get("cloud_synced_at", ""))
+            if not sane or is_future_timestamp(sane):
+                sane = _now()
+            user["updated_at"] = sane
+            if is_future_timestamp(str(user.get("created_at", ""))):
+                user["created_at"] = sane
+            if is_future_timestamp(str(user.get("deleted_at", ""))):
+                user["deleted_at"] = sane
+            changed = True
+        if changed:
+            self.save()
 
     def is_user_inactive(self, username: str) -> bool:
         user = self.data["users"].get(_user_key(username))
@@ -495,6 +524,12 @@ class AuthStore:
             return False
         existing = self.data.get("users", {}).get(key)
         updated_at = normalize_local_timestamp(str(item.get("updated_at") or _now()))
+        if is_future_timestamp(updated_at):
+            # Drift-poisoned cloud row (stamped further ahead than honest
+            # clock skew): importing it would irreversibly overwrite newer
+            # legitimate local state. Skip it - if the stamp is real, the
+            # row imports normally once actual time reaches it.
+            return False
         if existing is not None:
             local_updated = str(existing.get("updated_at", ""))
             if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing.get("cloud_sync_error"):

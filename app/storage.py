@@ -8,7 +8,13 @@ import sqlite3
 import uuid
 
 from app.config import SALES_SERVICE_NAMES
-from app.utils import is_timestamp_newer_or_equal, normalize_local_timestamp, parse_local_datetime
+from app.utils import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    is_future_timestamp,
+    is_timestamp_newer_or_equal,
+    normalize_local_timestamp,
+    parse_local_datetime,
+)
 
 
 def _now() -> datetime:
@@ -109,6 +115,61 @@ class AttendanceStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self._heal_future_timestamps()
+
+    def _heal_future_timestamps(self) -> None:
+        """Repair rows whose sync timestamps drifted days into the future.
+
+        Leftover damage from the old naive-timezone push bug: each cloud
+        round trip silently added the local UTC offset, so timestamps
+        snowballed weeks ahead of real time. A future-stamped row always
+        looks "newer" than any legitimate edit (so it can never be
+        replaced), and because its updated_at stays ahead of
+        cloud_synced_at forever, it re-pushes itself to the cloud on every
+        sync cycle - the source of both the "deleted user keeps coming
+        back" bug and the constant sync churn.
+
+        Rewinding updated_at to the row's last successful sync time (the
+        newest locally-generated timestamp known for it) lets genuinely
+        newer cloud state win again and ends the endless re-push loop.
+        """
+        bound = (_now() + timedelta(seconds=FUTURE_TIMESTAMP_TOLERANCE_SECONDS)).isoformat(timespec="microseconds")
+        now_value = _iso()
+        tables = [
+            "attendance_days",
+            "attendance_shifts",
+            "attendance_day_events",
+            "attendance_events",
+            "announcements",
+            "service_catalog",
+            "inventory_items",
+            "service_message_templates",
+            "sales_entries",
+            "app_settings",
+        ]
+        with self.connect() as connection:
+            for table in tables:
+                try:
+                    connection.execute(
+                        f"""
+                        UPDATE {table}
+                        SET updated_at = CASE
+                            WHEN cloud_synced_at <> '' AND cloud_synced_at < ? THEN cloud_synced_at
+                            ELSE ?
+                        END
+                        WHERE updated_at > ?
+                        """,
+                        (bound, now_value, bound),
+                    )
+                except sqlite3.OperationalError:
+                    continue
+                try:
+                    connection.execute(
+                        f"UPDATE {table} SET created_at = updated_at WHERE created_at > ?",
+                        (bound,),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -718,6 +779,8 @@ class AttendanceStore:
             return False
         value = str(item.get("setting_value", ""))
         updated_at = normalize_local_timestamp(str(item.get("updated_at") or _iso()))
+        if is_future_timestamp(updated_at):
+            return False
         with self.connect() as connection:
             existing = connection.execute(
                 "SELECT * FROM app_settings WHERE setting_key = ?",
@@ -1367,6 +1430,8 @@ class AttendanceStore:
             return False
         started_at = str(item.get("started_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or item.get("ended_at") or started_at)
+        if is_future_timestamp(updated_at):
+            return False
         ended_at = item.get("ended_at") or None
         with self.connect() as connection:
             existing = connection.execute("SELECT * FROM attendance_days WHERE cloud_id = ?", (cloud_id,)).fetchone()
@@ -1435,6 +1500,8 @@ class AttendanceStore:
         shift_number = int(item.get("shift_number") or 1)
         started_at = str(item.get("started_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or item.get("ended_at") or started_at)
+        if is_future_timestamp(updated_at):
+            return False
         ended_at = item.get("ended_at") or None
         current_break_started_at = item.get("current_break_started_at") or None
         with self.connect() as connection:
@@ -1521,6 +1588,8 @@ class AttendanceStore:
             return False
         event_time = str(item.get("event_time") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or event_time)
+        if is_future_timestamp(updated_at):
+            return False
         with self.connect() as connection:
             day = None
             if day_cloud_id:
@@ -1598,6 +1667,8 @@ class AttendanceStore:
         shift_number = int(item.get("shift_number") or 1)
         event_time = str(item.get("event_time") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or event_time)
+        if is_future_timestamp(updated_at):
+            return False
         with self.connect() as connection:
             shift = None
             if shift_cloud_id:
@@ -1903,6 +1974,8 @@ class AttendanceStore:
             return False
         created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or created_at)
+        if is_future_timestamp(updated_at):
+            return False
         is_active = 1 if bool(item.get("is_active", True)) else 0
         values = (
             str(item.get("category", "")),
@@ -2162,6 +2235,8 @@ class AttendanceStore:
             return False
         created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or created_at)
+        if is_future_timestamp(updated_at):
+            return False
         is_active = 1 if bool(item.get("is_active", True)) else 0
         with self.connect() as connection:
             existing = connection.execute(
@@ -2396,6 +2471,8 @@ class AttendanceStore:
             return False
         created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or created_at)
+        if is_future_timestamp(updated_at):
+            return False
         is_active = 1 if bool(item.get("is_active", True)) else 0
         with self.connect() as connection:
             existing = connection.execute(
@@ -2531,6 +2608,8 @@ class AttendanceStore:
             return False
         created_at = str(item.get("created_at") or item.get("updated_at") or _iso())
         updated_at = str(item.get("updated_at") or created_at)
+        if is_future_timestamp(updated_at):
+            return False
         is_active = 1 if bool(item.get("is_active", True)) else 0
         with self.connect() as connection:
             existing = connection.execute(
@@ -3048,6 +3127,8 @@ class AttendanceStore:
             return False
         created_at = normalize_local_timestamp(str(item.get("created_at") or item.get("updated_at") or _iso()))
         updated_at = normalize_local_timestamp(str(item.get("updated_at") or created_at))
+        if is_future_timestamp(updated_at):
+            return False
         excel_synced_at = normalize_local_timestamp(str(item.get("excel_synced_at") or ""))
         buying_amount = str(item.get("buying_amount") or "0")
         selling_amount = str(item.get("selling_amount") or "")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 def now_label() -> str:
@@ -78,6 +78,33 @@ def to_cloud_timestamp(value: str) -> str:
     if parsed.tzinfo is not None:
         return text
     return parsed.astimezone().isoformat(timespec="microseconds")
+
+
+# Allow this much genuine clock difference between the PCs before a
+# timestamp is treated as poisoned. Anything further ahead than this can't
+# be honest clock skew - it's leftover corruption from the old
+# timezone-drift push bug, where every push/pull round trip silently added
+# the local UTC offset and snowballed timestamps days into the future.
+FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 15 * 60
+
+
+def is_future_timestamp(value: str, tolerance_seconds: int = FUTURE_TIMESTAMP_TOLERANCE_SECONDS) -> bool:
+    """True if value is further in the future than honest clock skew allows.
+
+    Used to quarantine drift-poisoned rows: a record stamped days ahead
+    always wins "is it newer?" comparisons, so it silently overwrites every
+    legitimate edit and re-pushes itself on every sync cycle. Rejection is
+    naturally temporary - once real time passes the stamp, the row compares
+    normally again.
+    """
+    text = (value or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = parse_local_datetime(text)
+    except ValueError:
+        return False
+    return parsed > datetime.now() + timedelta(seconds=tolerance_seconds)
 
 
 def is_timestamp_newer_or_equal(local_value: str, candidate_value: str) -> bool:
