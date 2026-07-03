@@ -51,6 +51,13 @@ CLOUD_SYNCED_SETTING_KEYS = frozenset({"sales_workbook_path", "sales_worksheet_n
 # genuine sync failure, without a schema migration.
 EXCEL_RESYNC_AFTER_EDIT_MESSAGE = "Entry edited after Excel sync; re-sync needed."
 
+# Sentinel stored in sales_entries.excel_sync_error while an entry is queued
+# for its first Excel attempt. It rides the same text column, so admin.py can
+# tell "waiting for its first real Excel attempt" (Sync Pending) apart from
+# "an actual attempt failed" (Retry needed). The exact text must stay stable:
+# entries already in the cloud/other PCs carry this string.
+EXCEL_SYNC_PENDING_MESSAGE = "Excel sync pending in background."
+
 
 def _normalize_cloud_timestamps(item: dict) -> dict:
     """Reformat any offset-aware timestamps from a synced Supabase row to naive local time.

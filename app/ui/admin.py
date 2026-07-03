@@ -29,7 +29,7 @@ from app.config import (
     WHITE,
 )
 from app.excel_sales import ExcelSyncResult
-from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE
+from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE, EXCEL_SYNC_PENDING_MESSAGE
 from app.ui.widgets import (
     MetricCard,
     SurfaceCard,
@@ -2613,14 +2613,18 @@ class AdminPage(tk.Frame):
             return "Edited - Resync"
         if self._is_blocked_excel_sync_message(error):
             return "Not saved"
-        if not error:
-            return "Not Synced Yet"
+        # The pending sentinel is set the moment the employee queues the
+        # entry, before anyone with real workbook access has attempted it -
+        # that's a fresh entry waiting for its first sync, not a failure.
+        # "Retry needed" is reserved for an actual failed Excel attempt.
+        if not error or error == EXCEL_SYNC_PENDING_MESSAGE:
+            return "Sync Pending"
         return "Retry needed"
 
     def _sales_sync_tag(self, sync_label: str, index: int) -> str:
         if sync_label == "Synced":
             return "sales_synced"
-        if sync_label == "Syncing":
+        if sync_label in {"Syncing", "Sync Pending"}:
             return "sales_pending"
         if sync_label == "Edited - Resync":
             return "sales_edited"
@@ -2673,7 +2677,7 @@ class AdminPage(tk.Frame):
         pending = self.app.attendance_store.mark_sales_excel_error(
             int(entry["id"]),
             employee_username,
-            "Excel sync pending in background.",
+            EXCEL_SYNC_PENDING_MESSAGE,
         )
         self._refresh_sales_data()
         worker = threading.Thread(

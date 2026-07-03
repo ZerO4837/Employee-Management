@@ -217,9 +217,8 @@ def install_update(installer_path: Path) -> subprocess.Popen:
     /CLOSEAPPLICATIONS (paired with CloseApplications=yes in the .iss) tells
     Inno Setup to close the running app itself as part of installing, which
     routes through this app's own WM_DELETE_WINDOW handler (close_app) like
-    a normal close, including its "finish the in-flight Excel sync first"
-    wait - rather than this code trying to orchestrate that sequencing
-    itself in a second process.
+    a normal close - rather than this code trying to orchestrate that
+    sequencing itself in a second process.
     """
     suffix = installer_path.suffix.lower()
     if suffix == ".msi":

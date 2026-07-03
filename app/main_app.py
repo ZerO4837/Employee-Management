@@ -78,7 +78,6 @@ class EmployeeApp(tk.Tk):
         self.current_user = ""
         self.current_display_name = ""
         self.current_role = ""
-        self.close_waiting_for_excel_sync = False
         self.update_check_queue: queue.Queue[UpdateInfo] = queue.Queue()
         self.update_check_started = False
         self.update_check_after_id: str | None = None
@@ -274,14 +273,6 @@ class EmployeeApp(tk.Tk):
             )
             if not still_close:
                 return
-        dashboard = self.pages.get("dashboard")
-        if (
-            isinstance(dashboard, DashboardPage)
-            and dashboard.close_after_excel_sync(self._finish_close_app)
-        ):
-            self.close_waiting_for_excel_sync = True
-            self.title(f"{APP_NAME} - Finishing Excel sync")
-            return
         self._finish_close_app()
 
     def _finish_close_app(self) -> None:
@@ -540,8 +531,7 @@ class EmployeeApp(tk.Tk):
             # Don't close the window here - /CLOSEAPPLICATIONS on the
             # installer we just launched asks Windows to close this app for
             # us, which arrives through the normal WM_DELETE_WINDOW handler
-            # (close_app) exactly like the user clicking the close button,
-            # including its "finish the in-flight Excel sync first" wait.
+            # (close_app) exactly like the user clicking the close button.
             self.title(f"{APP_NAME} - Update launching...")
             return
         self.title(APP_NAME)
