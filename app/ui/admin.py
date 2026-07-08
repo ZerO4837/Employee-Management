@@ -2698,9 +2698,22 @@ class AdminPage(tk.Frame):
         if self.admin_excel_sync_all_running:
             show_app_alert(self, "Already syncing", "A full Excel sync is already in progress.", "info")
             return
-        pending = self.app.attendance_store.list_sales_entries_needing_excel_sync(limit=1000)
+        # Sync exactly the period the admin is looking at: a selected day
+        # syncs only that day, a month only that month - matching what the
+        # table and the Needs Sync card show.
+        start_date, end_date, period_label = self._selected_sales_period_range()
+        pending = self.app.attendance_store.list_sales_entries_needing_excel_sync(
+            start_date=start_date,
+            end_date=end_date,
+            limit=1000,
+        )
         if not pending:
-            show_app_alert(self, "Nothing to sync", "Every sales entry is already synced with Excel.", "info")
+            show_app_alert(
+                self,
+                "Nothing to sync",
+                f"Every sales entry in {period_label} is already synced with Excel.",
+                "info",
+            )
             return
         for entry in pending:
             self.admin_excel_sync_pending_entry_ids.add(str(entry["id"]))
@@ -2712,22 +2725,36 @@ class AdminPage(tk.Frame):
         show_app_alert(
             self,
             "Syncing to Excel",
-            f"Syncing {len(pending)} sales entries to Excel in the background. This page will update when it finishes.",
+            f"Syncing {len(pending)} sales entries from {period_label} to Excel in the background. "
+            "This page will update when it finishes.",
             "info",
         )
         worker = threading.Thread(target=self._run_admin_excel_sync_all_worker, args=(pending,), daemon=True)
         worker.start()
 
     def _run_admin_excel_sync_all_worker(self, entries: list[dict]) -> None:
-        # Entries are processed one at a time, in the same order they were
+        # One shared workbook session for the whole batch (sync_entries) -
+        # opening and closing Excel once per entry made OneDrive/Excel flash
+        # "closing workbook" prompts on the desktop for every entry. Entries
+        # are still processed one at a time, in the same order they were
         # sold, so screen-shared services (Netflix/HBO) append customers to
-        # the right Excel row in the right order instead of racing each other.
-        for entry in entries:
-            try:
-                sync_result = self.app.sales_workbook.sync_entry(entry)
-            except Exception as exc:
-                sync_result = ExcelSyncResult(False, message=str(exc))
+        # the right Excel row in the right order.
+        reported_ids: set[int] = set()
+
+        def report(entry: dict, sync_result: ExcelSyncResult) -> None:
+            reported_ids.add(id(entry))
             self.admin_excel_sync_all_results.put((entry, sync_result))
+
+        try:
+            self.app.sales_workbook.sync_entries(entries, on_result=report)
+        except Exception as exc:
+            # sync_entries reports per-entry and shouldn't raise; this is a
+            # last-resort guard so the progress counter can never hang. Only
+            # entries that never got a result are failed here, so nothing is
+            # ever double-counted.
+            for entry in entries:
+                if id(entry) not in reported_ids:
+                    self.admin_excel_sync_all_results.put((entry, ExcelSyncResult(False, message=str(exc))))
 
     def _finish_admin_excel_sync_all_item(self, entry: dict, sync_result: ExcelSyncResult) -> None:
         entry_id = str(entry.get("id", ""))

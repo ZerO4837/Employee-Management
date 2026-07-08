@@ -59,6 +59,29 @@ class SalesWorkbook:
     def is_cloud_url(self) -> bool:
         return self.target.lower().startswith(("http://", "https://"))
 
+    def sync_entries(self, entries: list[dict[str, Any]], on_result: Any = None) -> list[ExcelSyncResult]:
+        """Sync many entries, reusing a single workbook session where possible.
+
+        Entries are processed sequentially in the given order (screen-shared
+        services depend on chronological order). Returns one result per
+        entry and never raises; on_result(entry, result) is called as each
+        entry finishes so callers can stream progress.
+        """
+        if self._prefer_excel_com():
+            com_results = self._sync_entries_with_excel_com(entries, on_result)
+            if com_results is not None:
+                return com_results
+        results: list[ExcelSyncResult] = []
+        for entry in entries:
+            try:
+                result = self.sync_entry(entry)
+            except Exception as exc:
+                result = ExcelSyncResult(False, message=self._sync_error_message(exc))
+            results.append(result)
+            if on_result is not None:
+                on_result(entry, result)
+        return results
+
     def sync_entry(self, entry: dict[str, Any]) -> ExcelSyncResult:
         if self._prefer_excel_com():
             com_result = self._sync_entry_with_excel_com(entry)
@@ -297,6 +320,28 @@ class SalesWorkbook:
         )
 
     def _sync_entry_with_excel_com(self, entry: dict[str, Any]) -> ExcelSyncResult | None:
+        results = self._sync_entries_with_excel_com([entry])
+        if results is None:
+            return None
+        return results[0]
+
+    def _sync_entries_with_excel_com(
+        self,
+        entries: list[dict[str, Any]],
+        on_result: Any = None,
+    ) -> list[ExcelSyncResult] | None:
+        """Sync a whole batch of entries through ONE Excel COM session.
+
+        Opening and quitting a full Excel instance per entry made a "Sync
+        All" of N entries churn the workbook N times - each open/close cycle
+        of a OneDrive workbook can flash Excel/OneDrive "closing/now
+        available" prompts on the desktop, over and over. One shared session
+        per batch means one open and one close, no matter the batch size.
+
+        Returns None when COM isn't available (caller falls back to
+        openpyxl); otherwise returns exactly one result per entry, and calls
+        on_result(entry, result) as each finishes.
+        """
         if os.name != "nt" or (not self.is_cloud_url and not self.path.exists()):
             return None
 
@@ -306,51 +351,52 @@ class SalesWorkbook:
         except ModuleNotFoundError:
             return None
 
+        def _report(entry: dict[str, Any], result: ExcelSyncResult) -> ExcelSyncResult:
+            if on_result is not None:
+                on_result(entry, result)
+            return result
+
         pythoncom.CoInitialize()
         excel = None
         workbook = None
+        results: list[ExcelSyncResult] = []
         try:
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            excel.EnableEvents = False
-            excel.ScreenUpdating = False
+            try:
+                excel = win32com.client.DispatchEx("Excel.Application")
+                excel.Visible = False
+                excel.DisplayAlerts = False
+                excel.EnableEvents = False
+                excel.ScreenUpdating = False
 
-            workbook = excel.Workbooks.Open(
-                self.target,
-                UpdateLinks=0,
-                ReadOnly=False,
-                Notify=False,
-                AddToMru=False,
-                IgnoreReadOnlyRecommended=True,
-            )
-            if bool(getattr(workbook, "ReadOnly", False)):
-                raise PermissionError("Sales workbook opened read-only.")
+                workbook = excel.Workbooks.Open(
+                    self.target,
+                    UpdateLinks=0,
+                    ReadOnly=False,
+                    Notify=False,
+                    AddToMru=False,
+                    IgnoreReadOnlyRecommended=True,
+                )
+                if bool(getattr(workbook, "ReadOnly", False)):
+                    raise PermissionError("Sales workbook opened read-only.")
 
-            sheet = self._select_com_sheet(workbook)
-            self._ensure_com_headers(sheet)
-            screen_result = self._sync_screen_entry_com(sheet, entry)
-            if screen_result is not None:
-                if screen_result.saved:
-                    workbook.Save()
-                return screen_result
-            row = self._existing_row(entry)
-            matched_retry_row = False
-            max_row, _ = self._com_used_bounds(sheet)
-            if row is not None and (row > max_row or not self._com_row_identity_matches_entry(sheet, row, entry)):
-                row = None
-            if row is None:
-                row = self._matching_retry_row_com(sheet, entry)
-                matched_retry_row = row is not None
-            if matched_retry_row:
-                return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
-            if row is None:
-                row = self._next_row_com(sheet)
-            self._write_com_row(sheet, row, entry)
-            workbook.Save()
-            return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
-        except Exception as exc:
-            return ExcelSyncResult(False, message=self._sync_error_message(exc))
+                sheet = self._select_com_sheet(workbook)
+                self._ensure_com_headers(sheet)
+            except Exception as exc:
+                # The workbook itself is unreachable: every entry in the
+                # batch fails with the same reason, reported individually so
+                # per-entry bookkeeping stays consistent.
+                message = self._sync_error_message(exc)
+                for entry in entries:
+                    results.append(_report(entry, ExcelSyncResult(False, message=message)))
+                return results
+
+            for entry in entries:
+                try:
+                    result = self._sync_one_entry_com(workbook, sheet, entry)
+                except Exception as exc:
+                    result = ExcelSyncResult(False, message=self._sync_error_message(exc))
+                results.append(_report(entry, result))
+            return results
         finally:
             if workbook is not None:
                 try:
@@ -370,6 +416,28 @@ class SalesWorkbook:
             del excel
             gc.collect()
             pythoncom.CoUninitialize()
+
+    def _sync_one_entry_com(self, workbook, sheet, entry: dict[str, Any]) -> ExcelSyncResult:
+        screen_result = self._sync_screen_entry_com(sheet, entry)
+        if screen_result is not None:
+            if screen_result.saved:
+                workbook.Save()
+            return screen_result
+        row = self._existing_row(entry)
+        matched_retry_row = False
+        max_row, _ = self._com_used_bounds(sheet)
+        if row is not None and (row > max_row or not self._com_row_identity_matches_entry(sheet, row, entry)):
+            row = None
+        if row is None:
+            row = self._matching_retry_row_com(sheet, entry)
+            matched_retry_row = row is not None
+        if matched_retry_row:
+            return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
+        if row is None:
+            row = self._next_row_com(sheet)
+        self._write_com_row(sheet, row, entry)
+        workbook.Save()
+        return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
 
     def _select_com_sheet(self, workbook):
         if not self.worksheet_name:

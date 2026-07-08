@@ -2831,20 +2831,38 @@ class AttendanceStore:
             ).fetchall()
         return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
 
-    def list_sales_entries_needing_excel_sync(self, limit: int = 1000) -> list[dict]:
+    def list_sales_entries_needing_excel_sync(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 1000,
+    ) -> list[dict]:
         # Oldest first: screen-shared services (Netflix/HBO) append each new
         # customer to the same Excel row in the order they were sold, so a
         # batch sync must process entries in that same chronological order.
+        # An optional date window lets Sync All target only the period the
+        # admin currently has selected (e.g. a single day).
+        conditions = [
+            "excel_synced_at = ''",
+            "LOWER(excel_sync_error) NOT LIKE '%account is full%'",
+        ]
+        params: list[object] = []
+        if start_date:
+            conditions.append("entry_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("entry_date <= ?")
+            params.append(end_date)
+        params.append(limit)
         with self.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM sales_entries
-                WHERE excel_synced_at = ''
-                  AND LOWER(excel_sync_error) NOT LIKE '%account is full%'
+                WHERE {" AND ".join(conditions)}
                 ORDER BY entry_date ASC, created_at ASC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [entry for row in rows if (entry := _normalize_sales_row(row)) is not None]
 

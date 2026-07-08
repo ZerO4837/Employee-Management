@@ -444,12 +444,24 @@ def configure_treeview(style: ttk.Style) -> None:
 def bind_mousewheel_scroll(canvas: tk.Canvas) -> None:
     """Scroll `canvas` with the mouse wheel, but only while the pointer is over it."""
 
+    def _can_scroll() -> bool:
+        # When the content fits inside the viewport, yview is (0.0, 1.0) and
+        # there is nothing to scroll - but Tk's yview_scroll would still
+        # happily slide the view into blank space beyond the scrollregion,
+        # which is exactly the "scrolls up into emptiness" bug.
+        first, last = canvas.yview()
+        return first > 0.0 or last < 1.0
+
     def _on_mousewheel(event: tk.Event) -> None:
+        if not _can_scroll():
+            return
         delta = event.delta
         steps = -1 * (delta // 120) if abs(delta) >= 120 else -1 * delta
         canvas.yview_scroll(int(steps), "units")
 
     def _on_mousewheel_linux(event: tk.Event) -> None:
+        if not _can_scroll():
+            return
         canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 
     def _bind(_event: tk.Event | None = None) -> None:
@@ -487,6 +499,12 @@ def make_scrollable_region(parent: tk.Misc, bg: str = BG) -> tuple[tk.Frame, tk.
 
     def _sync_scrollregion(_event: tk.Event | None = None) -> None:
         canvas.configure(scrollregion=canvas.bbox("all"))
+        # If everything now fits in the viewport, force the view back to the
+        # top - otherwise a view that was previously scrolled (or nudged into
+        # blank space) stays displaced, showing emptiness above the content.
+        first, last = canvas.yview()
+        if first <= 0.0 and last >= 1.0 and canvas.canvasy(0) != 0:
+            canvas.yview_moveto(0)
 
     def _sync_width(event: tk.Event) -> None:
         canvas.itemconfigure(window_id, width=event.width)
