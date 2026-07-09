@@ -1090,7 +1090,7 @@ class DashboardPage(tk.Frame):
         padx = (0 if column == 0 else 12, 0)
         field_label(parent, label).grid(row=row, column=column, sticky="w", padx=padx)
         if kind == "combo" and values:
-            widget = combo_box(parent, variable, values)
+            widget = combo_box(parent, variable, values, searchable=key == "item")
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
             if key == "item":
                 self.sales_item_combo = widget
@@ -1818,7 +1818,11 @@ class DashboardPage(tk.Frame):
     def _set_sales_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.sales_input_widgets:
             if isinstance(widget, ttk.Combobox):
-                widget.configure(state="readonly" if enabled else "disabled")
+                if enabled:
+                    searchable = getattr(widget, "searchable", False)
+                    widget.configure(state="normal" if searchable else "readonly")
+                else:
+                    widget.configure(state="disabled")
             elif isinstance(widget, tk.Text):
                 widget.configure(state="normal" if enabled else "disabled")
             else:
@@ -2317,6 +2321,15 @@ class DashboardPage(tk.Frame):
         if resolved_item is None:
             messagebox.showerror("Missing item", "Items Sold is required.")
             return
+        # The item box is typeable (for filtering the list), so a half-typed
+        # value like "Adobe Cr" must not slip through as a service name.
+        if entry["item"] != "Other" and resolved_item not in self._sales_item_values():
+            messagebox.showerror(
+                "Unknown service",
+                "Please pick a service from the dropdown list.\n\n"
+                "For a service that is not listed, select 'Other' and write its name.",
+            )
+            return
         entry["item"] = resolved_item
         if not entry["buying_amount"]:
             entry["buying_amount"] = "0"
@@ -2476,7 +2489,7 @@ class EditEntryWindow(tk.Toplevel):
         padx = (0 if column == 0 else 12, 0)
         field_label(parent, label).grid(row=row, column=column, sticky="w", padx=padx)
         if kind == "combo" and values:
-            widget = combo_box(parent, variable, values)
+            widget = combo_box(parent, variable, values, searchable=key == "item")
             widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
             if key == "item":
                 self.sales_item_combo = widget
@@ -2566,6 +2579,15 @@ class EditEntryWindow(tk.Toplevel):
         resolved_item = self._resolved_item(updates["item"], self.item_other_var.get())
         if resolved_item is None:
             messagebox.showerror("Missing item", "Items Sold is required.")
+            return
+        # The item box is typeable (for filtering the list), so a half-typed
+        # value like "Adobe Cr" must not slip through as a service name.
+        if updates["item"] != "Other" and resolved_item not in self.dashboard._sales_item_values():
+            messagebox.showerror(
+                "Unknown service",
+                "Please pick a service from the dropdown list.\n\n"
+                "For a service that is not listed, select 'Other' and write its name.",
+            )
             return
         updates["item"] = resolved_item
         if not updates["buying_amount"]:

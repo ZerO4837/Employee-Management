@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import tkinter as tk
-from tkinter import ttk
+from tkinter import font as tkfont, ttk
 
 from app.config import (
     BG,
@@ -405,8 +406,108 @@ def text_entry(parent: tk.Misc, variable: tk.StringVar, show: str | None = None)
     )
 
 
-def combo_box(parent: tk.Misc, variable: tk.StringVar, values: list[str]) -> ttk.Combobox:
-    return ttk.Combobox(parent, values=values, textvariable=variable, state="readonly", font=(FONT, 10))
+def combo_box(
+    parent: tk.Misc,
+    variable: tk.StringVar,
+    values: list[str],
+    searchable: bool = False,
+) -> ttk.Combobox:
+    combo = ttk.Combobox(
+        parent,
+        values=values,
+        textvariable=variable,
+        state="normal" if searchable else "readonly",
+        font=(FONT, 10),
+    )
+    # Marker for enable/disable cycles: a searchable combo must come back as
+    # "normal" (typeable), not "readonly", or the type-to-filter dies the
+    # first time the form is toggled.
+    combo.searchable = searchable
+    _fit_combo_popdown(combo)
+    if searchable:
+        _enable_combo_search(combo)
+    return combo
+
+
+def _fit_combo_popdown(combo: ttk.Combobox) -> None:
+    """Widen the dropdown list to fully show the longest value.
+
+    Tk sizes the popdown list to exactly the combobox's own width, so on a
+    narrow field a long value like "Adobe Creative Cloud Monthly Shared"
+    gets clipped to "Adobe Creative Cloud Monthly" with no way to tell the
+    variants apart. This re-applies the popdown geometry right as it opens,
+    widened to fit the longest current value.
+    """
+    popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+
+    def _widen() -> None:
+        try:
+            values = [str(value) for value in (combo.cget("values") or ())]
+            if not values:
+                return
+            font_spec = str(combo.cget("font")) or "TkTextFont"
+            font_obj = tkfont.Font(root=combo, font=font_spec)
+            # Longest value plus room for the scrollbar and listbox padding.
+            needed = max(font_obj.measure(value) for value in values) + 48
+            geometry = str(combo.tk.call("wm", "geometry", popdown))
+            match = re.fullmatch(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", geometry)
+            if match is None:
+                return
+            width_text, height_text, x_text, y_text = match.groups()
+            width = max(int(width_text), needed)
+            # Keep the widened list on-screen if the field sits near the
+            # right edge.
+            x_position = int(x_text.lstrip("+"))
+            x_position = max(0, min(x_position, combo.winfo_screenwidth() - width))
+            combo.tk.call("wm", "geometry", popdown, f"{width}x{height_text}{x_position:+d}{y_text}")
+        except (tk.TclError, ValueError):
+            pass
+
+    combo.tk.call("bind", popdown, "<Map>", "+" + str(combo.register(_widen)))
+
+
+def _enable_combo_search(combo: ttk.Combobox) -> None:
+    """Let the user type into the combobox to filter the dropdown list.
+
+    Typing narrows the list to values starting with the typed text
+    (case-insensitive), so "a" leaves only the Adobe entries in a long
+    service list. Clearing the text, picking a value, or leaving the field
+    restores the full list. Values reconfigured externally (e.g. a service
+    catalog refresh) are picked up as the new full list automatically.
+    """
+    state: dict[str, list[str] | None] = {
+        "full": [str(value) for value in (combo.cget("values") or ())],
+        "filtered": None,
+    }
+
+    def _sync_full() -> None:
+        current = [str(value) for value in (combo.cget("values") or ())]
+        if state["filtered"] is None or current != state["filtered"]:
+            state["full"] = current
+
+    def _restore(_event: tk.Event | None = None) -> None:
+        _sync_full()
+        if state["filtered"] is not None:
+            combo.configure(values=state["full"])
+            state["filtered"] = None
+
+    def _filter(event: tk.Event) -> None:
+        if event.keysym in {"Up", "Down", "Return", "Escape", "Tab", "Left", "Right", "Home", "End"}:
+            return
+        _sync_full()
+        text = combo.get().strip()
+        full = state["full"] or []
+        if text:
+            lowered = text.lower()
+            filtered = [value for value in full if value.lower().startswith(lowered)]
+        else:
+            filtered = full
+        combo.configure(values=filtered)
+        state["filtered"] = filtered if filtered != full else None
+
+    combo.bind("<KeyRelease>", _filter, add="+")
+    combo.bind("<<ComboboxSelected>>", _restore, add="+")
+    combo.bind("<FocusOut>", _restore, add="+")
 
 
 def status_pill(parent: tk.Misc, text: str, fg: str = BLUE, bg: str = "#eef6ff") -> tk.Label:

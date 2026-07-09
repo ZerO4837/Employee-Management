@@ -621,7 +621,7 @@ class AdminPage(tk.Frame):
         )
         self.timeline_context_label = tk.Label(
             header,
-            text="Showing all recorded shift events",
+            text="Select a shift above to see its timeline",
             bg=WHITE,
             fg=MUTED,
             font=(FONT, 9),
@@ -2943,12 +2943,15 @@ class AdminPage(tk.Frame):
     def _refresh_event_table(self, shift_id: int | None) -> None:
         for item in self.events_tree.get_children():
             self.events_tree.delete(item)
-        events = self.app.attendance_store.list_events(shift_id=shift_id, limit=500)
         if shift_id is None:
-            events = list(reversed(events))
-            self.timeline_context_label.configure(text="Showing all recorded shift events")
-        else:
-            self.timeline_context_label.configure(text=f"Showing detailed events for shift #{shift_id}")
+            # No shift selected: keep the timeline empty instead of dumping
+            # every recorded event from every employee and every old sync -
+            # that unfiltered flood reads as trash data appearing from
+            # nowhere, and none of it is actionable without a shift context.
+            self.timeline_context_label.configure(text="Select a shift above to see its timeline")
+            return
+        events = self.app.attendance_store.list_events(shift_id=shift_id, limit=500)
+        self.timeline_context_label.configure(text=f"Showing detailed events for shift #{shift_id}")
         for index, event in enumerate(events):
             tag = self._event_tag(event["event_type"], index)
             self.events_tree.insert(
