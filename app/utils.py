@@ -80,6 +80,40 @@ def to_cloud_timestamp(value: str) -> str:
     return parsed.astimezone().isoformat(timespec="microseconds")
 
 
+_SALES_SEARCH_FIELDS = (
+    "customer",
+    "item",
+    "order_id",
+    "status",
+    "notes",
+    "employee_username",
+    "entry_date",
+    "entry_time",
+    "date",
+    "time",
+    "buying_amount",
+    "selling_amount",
+    "profit",
+)
+
+
+def sales_entry_matches_search(entry: dict, query: str) -> bool:
+    """True if any text field of a sales entry contains the query.
+
+    Plain case-insensitive substring matching on purpose: searching the
+    last 4 digits of a phone number stored inside the customer name or
+    order id still finds the entry.
+    """
+    needle = (query or "").strip().casefold()
+    if not needle:
+        return True
+    for field in _SALES_SEARCH_FIELDS:
+        value = entry.get(field)
+        if value is not None and needle in str(value).casefold():
+            return True
+    return False
+
+
 # Allow this much genuine clock difference between the PCs before a
 # timestamp is treated as poisoned. Anything further ahead than this can't
 # be honest clock skew - it's leftover corruption from the old

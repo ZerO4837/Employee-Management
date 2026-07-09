@@ -39,7 +39,7 @@ from app.ui.widgets import (
     show_app_alert,
     status_pill,
 )
-from app.utils import duration_label, money_label, parse_local_datetime, today_label
+from app.utils import duration_label, money_label, parse_local_datetime, sales_entry_matches_search, today_label
 
 
 class AdminPage(tk.Frame):
@@ -105,6 +105,7 @@ class AdminPage(tk.Frame):
         self.excel_path_var = tk.StringVar()
         self.excel_sheet_var = tk.StringVar()
         self.sales_period_var = tk.StringVar(value="Last 5 Days")
+        self.sales_search_var = tk.StringVar()
         self.admin_sales_entries: list[dict] = []
         self.admin_excel_sync_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
         self.admin_excel_sync_pending_entry_ids: set[str] = set()
@@ -1294,6 +1295,21 @@ class AdminPage(tk.Frame):
 
         controls = tk.Frame(header, bg=WHITE)
         controls.grid(row=0, column=1, rowspan=2, sticky="e")
+        tk.Label(controls, text="Search", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).pack(side="left", padx=(0, 8))
+        sales_search_entry = tk.Entry(
+            controls,
+            textvariable=self.sales_search_var,
+            width=20,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+        )
+        sales_search_entry.pack(side="left", padx=(0, 12), ipady=4)
+        self.sales_search_var.trace_add("write", lambda *_args: self._refresh_sales_data())
         tk.Label(controls, text="Period", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).pack(side="left", padx=(0, 8))
         self.sales_period_combo = ttk.Combobox(
             controls,
@@ -2501,6 +2517,9 @@ class AdminPage(tk.Frame):
         self._refresh_sales_period_values()
         start_date, end_date, period_label = self._selected_sales_period_range()
         entries = self.app.attendance_store.list_sales_entries_between(start_date, end_date)
+        search_query = self.sales_search_var.get().strip()
+        if search_query:
+            entries = [entry for entry in entries if sales_entry_matches_search(entry, search_query)]
         self.admin_sales_entries = entries
         total_selling = sum(self._sales_money_value(entry.get("selling_amount", "")) for entry in entries)
         total_profit = sum(self._sales_money_value(entry.get("profit", "")) for entry in entries)
@@ -2510,9 +2529,10 @@ class AdminPage(tk.Frame):
         self.sales_total_card.value_label.configure(text=money_label(str(total_selling)))
         self.sales_profit_card.value_label.configure(text=money_label(str(total_profit)))
         self.sales_retry_card.value_label.configure(text=str(retry_count))
-        self.sales_data_summary_label.configure(
-            text=f"{period_label} | {self._sales_window_label(start_date, end_date)} | {len(entries)} entries"
-        )
+        summary = f"{period_label} | {self._sales_window_label(start_date, end_date)} | {len(entries)} entries"
+        if search_query:
+            summary += f" | search: {search_query}"
+        self.sales_data_summary_label.configure(text=summary)
 
         for item in self.sales_data_tree.get_children():
             self.sales_data_tree.delete(item)

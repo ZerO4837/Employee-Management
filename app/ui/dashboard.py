@@ -46,7 +46,7 @@ from app.ui.widgets import (
     text_entry,
 )
 from app.storage import EXCEL_SYNC_PENDING_MESSAGE
-from app.utils import duration_label, money_label, now_label, parse_local_datetime, today_label
+from app.utils import duration_label, money_label, now_label, parse_local_datetime, sales_entry_matches_search, today_label
 
 
 def _amount_input_allowed(value: str) -> bool:
@@ -112,6 +112,7 @@ class DashboardPage(tk.Frame):
         self.daily_notes_tree: ttk.Treeview | None = None
         self.sales_entries: list[dict[str, str]] = []
         self.sales_selected_date = self._sales_date()
+        self.sales_search_var = tk.StringVar()
         self.sales_day_card_slots: list[dict[str, tk.Widget]] = []
         self.excel_sync_status_label: tk.Label | None = None
         self.sales_recent_canvas: tk.Canvas | None = None
@@ -989,6 +990,24 @@ class DashboardPage(tk.Frame):
             font=(FONT, 10),
         )
         self.selected_day_meta_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        search_box = tk.Frame(table_header, bg=WHITE)
+        search_box.grid(row=0, column=1, rowspan=2, sticky="e")
+        tk.Label(search_box, text="Search", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).pack(side="left", padx=(0, 8))
+        search_entry = tk.Entry(
+            search_box,
+            textvariable=self.sales_search_var,
+            width=24,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+        )
+        search_entry.pack(side="left", ipady=5)
+        self.sales_search_var.trace_add("write", lambda *_args: self._refresh_today_table())
 
         columns = ("id", "time", "customer", "item", "email_order", "buying", "selling", "status")
         self.today_tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
@@ -2073,8 +2092,13 @@ class DashboardPage(tk.Frame):
     def _refresh_today_table(self) -> None:
         for item in self.today_tree.get_children():
             self.today_tree.delete(item)
+        query = self.sales_search_var.get()
+        shown = 0
         for index, entry in enumerate(self._sales_entries_for_date(self.sales_selected_date)):
-            tag = "entry_even" if index % 2 == 0 else "entry_odd"
+            if not sales_entry_matches_search(entry, query):
+                continue
+            tag = "entry_even" if shown % 2 == 0 else "entry_odd"
+            shown += 1
             self.today_tree.insert(
                 "",
                 "end",
