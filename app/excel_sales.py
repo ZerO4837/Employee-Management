@@ -264,8 +264,12 @@ class SalesWorkbook:
         )
 
     def _find_screen_row_for_values(self, sheet, item: Any, order_id: Any) -> int | None:
-        if not self._text_key(order_id):
-            return None
+        # With an account email, the row for that exact account is the
+        # target. Without one, no-email sales of the same screen service
+        # pool together: the newest no-email row for that service keeps
+        # collecting customers until it reaches the service's name limit
+        # (fullness is the caller's decision). Empty order_id matches only
+        # rows whose email cell is also empty.
         for row in range(max(sheet.max_row, 1), 1, -1):
             if self._screen_row_matches_values(
                 sheet.cell(row=row, column=2).value,
@@ -303,6 +307,12 @@ class SalesWorkbook:
         if self._customer_exists(customers, customer):
             return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
         if len(customers) >= limit:
+            if not self._text_key(entry.get("order_id", "")):
+                # No account email, so nothing ties this sale to the full
+                # row - fall through to the normal flow, which starts a
+                # fresh row that future no-email sales then fill up to the
+                # limit again.
+                return None
             return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit), blocked=True)
 
         customers.append(customer)
@@ -508,8 +518,8 @@ class SalesWorkbook:
         )
 
     def _find_screen_row_com_for_values(self, sheet, item: Any, order_id: Any) -> int | None:
-        if not self._text_key(order_id):
-            return None
+        # Mirrors _find_screen_row_for_values: an empty order_id pools
+        # no-email sales into the newest no-email row of the same service.
         max_row, _ = self._com_used_bounds(sheet)
         for row in range(max(max_row, 1), 1, -1):
             if self._screen_row_matches_values(
@@ -548,6 +558,10 @@ class SalesWorkbook:
         if self._customer_exists(customers, customer):
             return ExcelSyncResult(True, row=row, message=f"Existing Excel row {row}")
         if len(customers) >= limit:
+            if not self._text_key(entry.get("order_id", "")):
+                # No account email: overflow to a fresh row instead of
+                # blocking (mirrors _sync_screen_entry).
+                return None
             return ExcelSyncResult(False, row=row, message=self._screen_full_message(entry, limit), blocked=True)
 
         customers.append(customer)

@@ -22,6 +22,7 @@ from app.config import (
     MANAGED_SALES_WORKBOOK_PATH,
     MUTED,
     NAVY,
+    SALES_FIELDS,
     SUCCESS,
     TEAL,
     TEXT,
@@ -30,16 +31,21 @@ from app.config import (
 )
 from app.excel_sales import ExcelSyncResult
 from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE, EXCEL_SYNC_PENDING_MESSAGE
+from app.ui.dashboard import _amount_input_allowed, _amount_value_valid
 from app.ui.widgets import (
     MetricCard,
     SurfaceCard,
+    combo_box,
+    field_label,
     fill_with_scrollable_region,
     make_button,
+    make_scrollable_region,
     set_button_enabled,
     show_app_alert,
     status_pill,
+    text_entry,
 )
-from app.utils import duration_label, money_label, parse_local_datetime, sales_entry_matches_search, today_label
+from app.utils import duration_label, money_label, now_label, parse_local_datetime, sales_entry_matches_search, today_label
 
 
 class AdminPage(tk.Frame):
@@ -1321,6 +1327,7 @@ class AdminPage(tk.Frame):
         )
         self.sales_period_combo.pack(side="left", padx=(0, 10), ipady=3)
         self.sales_period_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_sales_data())
+        make_button(controls, "Add Entry", self.open_add_entry_window, "primary").pack(side="left", padx=(0, 10))
         self.admin_retry_button = make_button(controls, "Retry Selected Sync", self.retry_selected_admin_sales_sync, "warning")
         self.admin_retry_button.pack(side="left", padx=(0, 10))
         self.admin_sync_all_button = make_button(controls, "Sync All to Excel", self.sync_all_to_excel, "success")
@@ -3082,3 +3089,251 @@ class AdminPage(tk.Frame):
         if event_type in {"first_shift_close", "check_out", "day_start", "day_end"}:
             return "close"
         return "default_even" if index % 2 == 0 else "default_odd"
+
+    def open_add_entry_window(self) -> None:
+        AdminAddEntryWindow(self)
+
+
+class AdminAddEntryWindow(tk.Toplevel):
+    """Admin-side "add a sales entry" dialog - the same form the employee
+    fills, plus which employee sold it and on which date."""
+
+    def __init__(self, admin_page: AdminPage) -> None:
+        super().__init__(admin_page)
+        self.admin_page = admin_page
+        self.app = admin_page.app
+        self.title("Add Sales Entry")
+        self.configure(bg=BG)
+        self.transient(self.app)
+        self.grab_set()
+        self.employee_var = tk.StringVar()
+        self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.vars: dict[str, tk.StringVar] = {}
+        self.item_other_var = tk.StringVar()
+        self.item_other_widgets: list[tk.Widget] = []
+        self.status_other_var = tk.StringVar()
+        self.status_other_widgets: list[tk.Widget] = []
+        self._build()
+        self._configure_window_geometry()
+        self._center_on_parent()
+
+    def _employee_usernames(self) -> list[str]:
+        return [user["username"] for user in self.app.auth.list_users(include_admin=False)]
+
+    def _sales_item_values(self) -> list[str]:
+        return self.app.attendance_store.list_service_names(include_other=True)
+
+    def _build(self) -> None:
+        panel = SurfaceCard(self, padx=0, pady=0, accent=True, accent_start=BLUE, accent_end=TEAL)
+        panel.pack(fill="both", expand=True, padx=20, pady=20)
+        outer = panel.body
+        outer.configure(padx=0, pady=0)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(0, weight=1)
+
+        scroll_container, body = make_scrollable_region(outer, bg=WHITE)
+        scroll_container.grid(row=0, column=0, sticky="nsew")
+        body.configure(padx=24, pady=22)
+        body.grid_columnconfigure((0, 1), weight=1)
+        self.form_body = body
+
+        tk.Label(body, text="Add Sales Entry", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 18)
+        )
+
+        field_label(body, "Employee").grid(row=1, column=0, sticky="w")
+        combo_box(body, self.employee_var, self._employee_usernames()).grid(
+            row=2, column=0, sticky="ew", ipady=6, pady=(8, 14)
+        )
+        field_label(body, "Date (YYYY-MM-DD)").grid(row=1, column=1, sticky="w", padx=(12, 0))
+        text_entry(body, self.date_var).grid(
+            row=2, column=1, sticky="ew", ipady=8, padx=(12, 0), pady=(8, 14)
+        )
+
+        row = 3
+        for index, (key, label, kind, values) in enumerate(SALES_FIELDS):
+            column = index % 2
+            if column == 0 and index > 0:
+                row += 2
+            self._field(body, key, label, row, column, kind, values)
+
+        self._item_other_field(body, row + 2, 1)
+        self._status_other_field(body, row + 4, 0)
+
+        actions = tk.Frame(outer, bg=WHITE, padx=24)
+        actions.grid(row=1, column=0, sticky="ew", pady=(10, 22))
+        actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(actions, "Add Entry", self.save, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        make_button(actions, "Cancel", self.destroy, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.actions_frame = actions
+
+    def _field(
+        self,
+        parent: tk.Misc,
+        key: str,
+        label: str,
+        row: int,
+        column: int,
+        kind: str,
+        values: list[str] | None,
+    ) -> None:
+        if key == "item":
+            values = self._sales_item_values()
+        variable = tk.StringVar()
+        if key == "buying_amount":
+            variable.set("0")
+        elif values:
+            variable.set(values[0])
+        self.vars[key] = variable
+        padx = (0 if column == 0 else 12, 0)
+        field_label(parent, label).grid(row=row, column=column, sticky="w", padx=padx)
+        if kind == "combo" and values:
+            widget = combo_box(parent, variable, values, searchable=key == "item")
+            widget.grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(8, 14))
+            if key == "item":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_item_other_visibility())
+            if key == "status":
+                widget.bind("<<ComboboxSelected>>", lambda _event: self._update_status_other_visibility())
+            return
+        widget = text_entry(parent, variable)
+        if key in {"buying_amount", "selling_amount"}:
+            widget.configure(
+                validate="key",
+                validatecommand=(self.register(_amount_input_allowed), "%P"),
+            )
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+
+    def _item_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        padx = (12, 0)
+        label = field_label(parent, "Other Service Name")
+        label.grid(row=row, column=column, sticky="w", padx=padx)
+        widget = text_entry(parent, self.item_other_var)
+        widget.grid(row=row + 1, column=column, sticky="ew", ipady=8, padx=padx, pady=(8, 14))
+        self.item_other_widgets = [label, widget]
+        self._update_item_other_visibility()
+
+    def _status_other_field(self, parent: tk.Misc, row: int, column: int) -> None:
+        label = field_label(parent, "Other Status Reason")
+        label.grid(row=row, column=column, columnspan=2, sticky="w")
+        widget = text_entry(parent, self.status_other_var)
+        widget.grid(row=row + 1, column=column, columnspan=2, sticky="ew", ipady=8, pady=(8, 14))
+        self.status_other_widgets = [label, widget]
+        self._update_status_other_visibility()
+
+    def _update_item_other_visibility(self) -> None:
+        show_other = self.vars.get("item") is not None and self.vars["item"].get() == "Other"
+        for widget in self.item_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _update_status_other_visibility(self) -> None:
+        show_other = self.vars.get("status") is not None and self.vars["status"].get() == "Other"
+        for widget in self.status_other_widgets:
+            if show_other:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _configure_window_geometry(self) -> None:
+        # Same content-driven, screen-capped sizing as the employee's edit
+        # window - never opens with Save/Cancel off-screen.
+        self.update_idletasks()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        required_width = self.form_body.winfo_reqwidth() + 64
+        required_height = self.form_body.winfo_reqheight() + self.actions_frame.winfo_reqheight() + 70
+        width = min(max(required_width, 700), screen_width - 60)
+        height = min(max(required_height, 440), screen_height - 130)
+        self.geometry(f"{width}x{height}")
+        self.minsize(min(640, width), min(400, height))
+
+    def _center_on_parent(self) -> None:
+        self.update_idletasks()
+        parent = self.app
+        parent.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x_position = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y_position = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        x_position = max(0, min(x_position, screen_width - width))
+        y_position = max(0, min(y_position, screen_height - height - 50))
+        self.geometry(f"{width}x{height}+{x_position}+{y_position}")
+
+    def _resolved_item(self, selected_item: str, other_item: str) -> str | None:
+        if selected_item == "Other":
+            item = other_item.strip()
+            return item or None
+        return selected_item.strip() or None
+
+    def _resolved_status(self, selected_status: str, other_reason: str) -> str | None:
+        if selected_status == "Other":
+            status = other_reason.strip()
+            return status or None
+        return selected_status or "Done"
+
+    def save(self) -> None:
+        employee = self.employee_var.get().strip()
+        if not employee:
+            messagebox.showerror("Missing employee", "Select which employee sold this.", parent=self)
+            return
+        if employee not in self._employee_usernames():
+            messagebox.showerror("Unknown employee", "Pick an employee from the list.", parent=self)
+            return
+        entry_date = self.date_var.get().strip()
+        try:
+            datetime.strptime(entry_date, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Invalid date", "Date must be in YYYY-MM-DD format, e.g. 2026-07-03.", parent=self)
+            return
+        entry = {key: variable.get().strip() for key, variable in self.vars.items()}
+        if not entry["customer"]:
+            messagebox.showerror("Missing customer", "Customer Name is required.", parent=self)
+            return
+        resolved_item = self._resolved_item(entry["item"], self.item_other_var.get())
+        if resolved_item is None:
+            messagebox.showerror("Missing item", "Items Sold is required.", parent=self)
+            return
+        if entry["item"] != "Other" and resolved_item not in self._sales_item_values():
+            messagebox.showerror(
+                "Unknown service",
+                "Please pick a service from the dropdown list.\n\n"
+                "For a service that is not listed, select 'Other' and write its name.",
+                parent=self,
+            )
+            return
+        entry["item"] = resolved_item
+        if not entry["buying_amount"]:
+            entry["buying_amount"] = "0"
+        if not entry["selling_amount"]:
+            messagebox.showerror("Missing selling amount", "Selling Amount is required.", parent=self)
+            return
+        for key, label in (("buying_amount", "Buying Amount"), ("selling_amount", "Selling Amount")):
+            if not _amount_value_valid(entry[key]):
+                messagebox.showerror("Invalid amount", f"{label} must be a number.", parent=self)
+                return
+        resolved_status = self._resolved_status(entry["status"], self.status_other_var.get())
+        if resolved_status is None:
+            messagebox.showerror("Missing status reason", "Please write the reason for Other status.", parent=self)
+            return
+        entry["status"] = resolved_status
+        entry["date"] = entry_date
+        entry["time"] = now_label()
+
+        saved = self.app.attendance_store.create_sales_entry(employee, entry_date, entry)
+        # Same as an employee-created entry: stamped pending so it shows as
+        # "Sync Pending" and Sync All picks it up for Excel.
+        self.app.attendance_store.mark_sales_excel_error(int(saved["id"]), employee, EXCEL_SYNC_PENDING_MESSAGE)
+        self.admin_page.refresh_all()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(
+            self.admin_page,
+            "Entry added",
+            f"Sales entry for {employee} on {entry_date} was added.",
+            "success",
+        )
+        self.destroy()
+
