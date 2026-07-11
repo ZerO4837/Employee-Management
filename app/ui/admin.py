@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.cloud_sync import SupabaseConfig
 from app.config import (
+    ADMIN_USERNAME,
     BG,
     BLUE,
     BLUE_DARK,
@@ -599,7 +600,7 @@ class AdminPage(tk.Frame):
             "break_time": 120,
         }
         for column in columns:
-            self.shifts_tree.heading(column, text=headings[column])
+            self.shifts_tree.heading(column, text=headings[column], anchor="w")
             self.shifts_tree.column(column, width=widths[column], minwidth=widths[column], anchor="w", stretch=False)
         self.shifts_tree.tag_configure("active", background="#eafaf4", foreground=TEXT)
         self.shifts_tree.tag_configure("closed_even", background=WHITE, foreground=TEXT)
@@ -636,11 +637,11 @@ class AdminPage(tk.Frame):
         self.timeline_context_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         self.events_tree = ttk.Treeview(events, columns=("date", "time", "shift", "event", "details"), show="headings")
-        self.events_tree.heading("date", text="Date")
-        self.events_tree.heading("time", text="Time")
-        self.events_tree.heading("shift", text="Shift")
-        self.events_tree.heading("event", text="Event")
-        self.events_tree.heading("details", text="Details")
+        self.events_tree.heading("date", text="Date", anchor="w")
+        self.events_tree.heading("time", text="Time", anchor="w")
+        self.events_tree.heading("shift", text="Shift", anchor="w")
+        self.events_tree.heading("event", text="Event", anchor="w")
+        self.events_tree.heading("details", text="Details", anchor="w")
         self.events_tree.column("date", width=104, minwidth=104, anchor="w", stretch=False)
         self.events_tree.column("time", width=98, minwidth=98, anchor="w", stretch=False)
         self.events_tree.column("shift", width=96, minwidth=96, anchor="w", stretch=False)
@@ -719,9 +720,9 @@ class AdminPage(tk.Frame):
             row=0, column=0, sticky="w", pady=(0, 12)
         )
         self.announcements_tree = ttk.Treeview(recent, columns=("time", "category", "title"), show="headings")
-        self.announcements_tree.heading("time", text="Time")
-        self.announcements_tree.heading("category", text="Category")
-        self.announcements_tree.heading("title", text="Title")
+        self.announcements_tree.heading("time", text="Time", anchor="w")
+        self.announcements_tree.heading("category", text="Category", anchor="w")
+        self.announcements_tree.heading("title", text="Title", anchor="w")
         self.announcements_tree.column("time", width=96, anchor="w", stretch=False)
         self.announcements_tree.column("category", width=130, anchor="w", stretch=False)
         self.announcements_tree.column("title", width=260, anchor="w", stretch=True)
@@ -839,8 +840,8 @@ class AdminPage(tk.Frame):
             row=0, column=0, sticky="w", pady=(0, 12)
         )
         self.templates_tree = ttk.Treeview(active, columns=("service", "updated"), show="headings")
-        self.templates_tree.heading("service", text="Service")
-        self.templates_tree.heading("updated", text="Updated")
+        self.templates_tree.heading("service", text="Service", anchor="w")
+        self.templates_tree.heading("updated", text="Updated", anchor="w")
         self.templates_tree.column("service", width=280, anchor="w", stretch=True)
         self.templates_tree.column("updated", width=115, anchor="w", stretch=False)
         self.templates_tree.tag_configure("template_even", background=WHITE, foreground=TEXT)
@@ -1281,7 +1282,7 @@ class AdminPage(tk.Frame):
         self.sales_total_card.grid(row=0, column=1, sticky="ew", padx=3)
         self.sales_profit_card = MetricCard(metrics, "Total Profit", "0", TEAL, "Visible entries")
         self.sales_profit_card.grid(row=0, column=2, sticky="ew", padx=3)
-        self.sales_retry_card = MetricCard(metrics, "Needs Sync", "0", WARNING, "Excel retry needed")
+        self.sales_retry_card = MetricCard(metrics, "Needs Sync", "0", WARNING, "Waiting for Excel sync")
         self.sales_retry_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
 
         table_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=BLUE, accent_end=SUCCESS)
@@ -1328,6 +1329,7 @@ class AdminPage(tk.Frame):
         self.sales_period_combo.pack(side="left", padx=(0, 10), ipady=3)
         self.sales_period_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_sales_data())
         make_button(controls, "Add Entry", self.open_add_entry_window, "primary").pack(side="left", padx=(0, 10))
+        make_button(controls, "Edit Selected", self.open_edit_entry_window, "light").pack(side="left", padx=(0, 10))
         self.admin_retry_button = make_button(controls, "Retry Selected Sync", self.retry_selected_admin_sales_sync, "warning")
         self.admin_retry_button.pack(side="left", padx=(0, 10))
         self.admin_sync_all_button = make_button(controls, "Sync All to Excel", self.sync_all_to_excel, "success")
@@ -1375,7 +1377,9 @@ class AdminPage(tk.Frame):
             "sync": 120,
         }
         for column in columns:
-            self.sales_data_tree.heading(column, text=headings[column])
+            # anchor="w" on the heading too: the cells are left-aligned, so
+            # a centered heading sits visibly off from its column's data.
+            self.sales_data_tree.heading(column, text=headings[column], anchor="w")
             self.sales_data_tree.column(
                 column,
                 width=widths[column],
@@ -3093,21 +3097,40 @@ class AdminPage(tk.Frame):
     def open_add_entry_window(self) -> None:
         AdminAddEntryWindow(self)
 
+    def open_edit_entry_window(self) -> None:
+        entry = self._selected_admin_sales_entry()
+        if entry is None:
+            show_app_alert(self, "No sale selected", "Select a sales row first.", "warning")
+            return
+        AdminAddEntryWindow(self, entry=entry)
+
 
 class AdminAddEntryWindow(tk.Toplevel):
-    """Admin-side "add a sales entry" dialog - the same form the employee
-    fills, plus which employee sold it and on which date."""
+    """Admin-side add/edit dialog for a sales entry - the same form the
+    employee fills, plus which employee sold it and on which date. Pass an
+    existing entry to open it prefilled in edit mode (employee and date are
+    fixed for an existing entry; everything else is editable)."""
 
-    def __init__(self, admin_page: AdminPage) -> None:
+    def __init__(self, admin_page: AdminPage, entry: dict | None = None) -> None:
         super().__init__(admin_page)
         self.admin_page = admin_page
         self.app = admin_page.app
-        self.title("Add Sales Entry")
+        self.entry = entry
+        self.title("Edit Sales Entry" if entry else "Add Sales Entry")
         self.configure(bg=BG)
         self.transient(self.app)
         self.grab_set()
-        self.employee_var = tk.StringVar()
-        self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        if entry is not None:
+            employee_default = str(entry.get("employee_username", ""))
+            date_default = str(entry.get("entry_date", ""))
+        else:
+            # Data entered by the admin is attributed to the admin account
+            # by default, so it isn't silently booked under whichever
+            # employee happens to sit first in the list.
+            employee_default = self.app.current_user or ADMIN_USERNAME
+            date_default = datetime.now().strftime("%Y-%m-%d")
+        self.employee_var = tk.StringVar(value=employee_default)
+        self.date_var = tk.StringVar(value=date_default)
         self.vars: dict[str, tk.StringVar] = {}
         self.item_other_var = tk.StringVar()
         self.item_other_widgets: list[tk.Widget] = []
@@ -3118,7 +3141,8 @@ class AdminAddEntryWindow(tk.Toplevel):
         self._center_on_parent()
 
     def _employee_usernames(self) -> list[str]:
-        return [user["username"] for user in self.app.auth.list_users(include_admin=False)]
+        # The admin account is a valid "entered by" identity too.
+        return [user["username"] for user in self.app.auth.list_users(include_admin=True)]
 
     def _sales_item_values(self) -> list[str]:
         return self.app.attendance_store.list_service_names(include_other=True)
@@ -3137,18 +3161,26 @@ class AdminAddEntryWindow(tk.Toplevel):
         body.grid_columnconfigure((0, 1), weight=1)
         self.form_body = body
 
-        tk.Label(body, text="Add Sales Entry", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 18)
-        )
+        editing = self.entry is not None
+        tk.Label(
+            body,
+            text="Edit Sales Entry" if editing else "Add Sales Entry",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 18),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 18))
 
         field_label(body, "Employee").grid(row=1, column=0, sticky="w")
-        combo_box(body, self.employee_var, self._employee_usernames()).grid(
-            row=2, column=0, sticky="ew", ipady=6, pady=(8, 14)
-        )
+        employee_combo = combo_box(body, self.employee_var, self._employee_usernames())
+        employee_combo.grid(row=2, column=0, sticky="ew", ipady=6, pady=(8, 14))
         field_label(body, "Date (YYYY-MM-DD)").grid(row=1, column=1, sticky="w", padx=(12, 0))
-        text_entry(body, self.date_var).grid(
-            row=2, column=1, sticky="ew", ipady=8, padx=(12, 0), pady=(8, 14)
-        )
+        date_entry = text_entry(body, self.date_var)
+        date_entry.grid(row=2, column=1, sticky="ew", ipady=8, padx=(12, 0), pady=(8, 14))
+        if editing:
+            # An existing entry stays with its employee and day - the
+            # storage update is keyed by both, so they are shown but fixed.
+            employee_combo.configure(state="disabled")
+            date_entry.configure(state="disabled", disabledbackground="#eef6ff", disabledforeground=TEXT)
 
         row = 3
         for index, (key, label, kind, values) in enumerate(SALES_FIELDS):
@@ -3163,7 +3195,9 @@ class AdminAddEntryWindow(tk.Toplevel):
         actions = tk.Frame(outer, bg=WHITE, padx=24)
         actions.grid(row=1, column=0, sticky="ew", pady=(10, 22))
         actions.grid_columnconfigure((0, 1), weight=1)
-        make_button(actions, "Add Entry", self.save, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        make_button(actions, "Save Changes" if editing else "Add Entry", self.save, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
         make_button(actions, "Cancel", self.destroy, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
         self.actions_frame = actions
 
@@ -3179,11 +3213,22 @@ class AdminAddEntryWindow(tk.Toplevel):
     ) -> None:
         if key == "item":
             values = self._sales_item_values()
-        variable = tk.StringVar()
-        if key == "buying_amount":
-            variable.set("0")
-        elif values:
-            variable.set(values[0])
+        if self.entry is not None:
+            value = str(self.entry.get(key, ""))
+            if key == "item" and values and value not in values:
+                variable = tk.StringVar(value="Other")
+                self.item_other_var.set(value)
+            elif key == "status" and values and value not in values:
+                variable = tk.StringVar(value="Other")
+                self.status_other_var.set(value)
+            else:
+                variable = tk.StringVar(value=value)
+        else:
+            variable = tk.StringVar()
+            if key == "buying_amount":
+                variable.set("0")
+            elif values:
+                variable.set(values[0])
         self.vars[key] = variable
         padx = (0 if column == 0 else 12, 0)
         field_label(parent, label).grid(row=row, column=column, sticky="w", padx=padx)
@@ -3276,19 +3321,24 @@ class AdminAddEntryWindow(tk.Toplevel):
         return selected_status or "Done"
 
     def save(self) -> None:
-        employee = self.employee_var.get().strip()
-        if not employee:
-            messagebox.showerror("Missing employee", "Select which employee sold this.", parent=self)
-            return
-        if employee not in self._employee_usernames():
-            messagebox.showerror("Unknown employee", "Pick an employee from the list.", parent=self)
-            return
-        entry_date = self.date_var.get().strip()
-        try:
-            datetime.strptime(entry_date, "%Y-%m-%d")
-        except ValueError:
-            messagebox.showerror("Invalid date", "Date must be in YYYY-MM-DD format, e.g. 2026-07-03.", parent=self)
-            return
+        editing = self.entry is not None
+        if editing:
+            employee = str(self.entry.get("employee_username", ""))
+            entry_date = str(self.entry.get("entry_date", ""))
+        else:
+            employee = self.employee_var.get().strip()
+            if not employee:
+                messagebox.showerror("Missing employee", "Select which employee sold this.", parent=self)
+                return
+            if employee not in self._employee_usernames():
+                messagebox.showerror("Unknown employee", "Pick an employee from the list.", parent=self)
+                return
+            entry_date = self.date_var.get().strip()
+            try:
+                datetime.strptime(entry_date, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showerror("Invalid date", "Date must be in YYYY-MM-DD format, e.g. 2026-07-03.", parent=self)
+                return
         entry = {key: variable.get().strip() for key, variable in self.vars.items()}
         if not entry["customer"]:
             messagebox.showerror("Missing customer", "Customer Name is required.", parent=self)
@@ -3320,20 +3370,24 @@ class AdminAddEntryWindow(tk.Toplevel):
             messagebox.showerror("Missing status reason", "Please write the reason for Other status.", parent=self)
             return
         entry["status"] = resolved_status
-        entry["date"] = entry_date
-        entry["time"] = now_label()
 
-        saved = self.app.attendance_store.create_sales_entry(employee, entry_date, entry)
-        # Same as an employee-created entry: stamped pending so it shows as
-        # "Sync Pending" and Sync All picks it up for Excel.
-        self.app.attendance_store.mark_sales_excel_error(int(saved["id"]), employee, EXCEL_SYNC_PENDING_MESSAGE)
+        if editing:
+            # update_sales_entry flags the entry for a fresh Excel sync on
+            # its own ("Edited - Resync" if it was already synced).
+            self.app.attendance_store.update_sales_entry(int(self.entry["id"]), employee, entry)
+            message = f"Sales entry for {employee} on {entry_date} was updated."
+            title = "Entry updated"
+        else:
+            entry["date"] = entry_date
+            entry["time"] = now_label()
+            saved = self.app.attendance_store.create_sales_entry(employee, entry_date, entry)
+            # Same as an employee-created entry: stamped pending so it shows
+            # as "Sync Pending" and Sync All picks it up for Excel.
+            self.app.attendance_store.mark_sales_excel_error(int(saved["id"]), employee, EXCEL_SYNC_PENDING_MESSAGE)
+            message = f"Sales entry for {employee} on {entry_date} was added."
+            title = "Entry added"
         self.admin_page.refresh_all()
         self.app.request_cloud_sync(push_local=True)
-        show_app_alert(
-            self.admin_page,
-            "Entry added",
-            f"Sales entry for {employee} on {entry_date} was added.",
-            "success",
-        )
+        show_app_alert(self.admin_page, title, message, "success")
         self.destroy()
 

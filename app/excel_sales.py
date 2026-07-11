@@ -11,6 +11,7 @@ from typing import Any
 from zipfile import is_zipfile
 
 from app.config import SALES_EXCEL_DATE_FORMAT, SALES_WORKBOOK_PATH, SALES_WORKSHEET_NAME
+from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE
 
 
 @dataclass(frozen=True)
@@ -512,9 +513,11 @@ class SalesWorkbook:
         return False
 
     def _com_row_identity_matches_entry(self, sheet, row: int, entry: dict[str, Any]) -> bool:
-        return all(
-            self._text_key(sheet.Cells(row, column).Value) == self._text_key(entry.get(key, ""))
-            for column, key in ((1, "customer"), (2, "item"), (3, "order_id"))
+        return self._entry_claims_row(
+            sheet.Cells(row, 1).Value,
+            sheet.Cells(row, 2).Value,
+            sheet.Cells(row, 3).Value,
+            entry,
         )
 
     def _find_screen_row_com_for_values(self, sheet, item: Any, order_id: Any) -> int | None:
@@ -666,10 +669,54 @@ class SalesWorkbook:
         return False
 
     def _row_identity_matches_entry(self, sheet, row: int, entry: dict[str, Any]) -> bool:
-        return all(
-            self._text_key(sheet.cell(row=row, column=column).value) == self._text_key(entry.get(key, ""))
-            for column, key in ((1, "customer"), (2, "item"), (3, "order_id"))
+        return self._entry_claims_row(
+            sheet.cell(row=row, column=1).value,
+            sheet.cell(row=row, column=2).value,
+            sheet.cell(row=row, column=3).value,
+            entry,
         )
+
+    def _entry_claims_row(
+        self,
+        actual_customer: Any,
+        actual_item: Any,
+        actual_order_id: Any,
+        entry: dict[str, Any],
+    ) -> bool:
+        """Does this entry own the Excel row currently holding these values?
+
+        1. The row matches the entry as it is NOW - a plain retry.
+        2. The row matches the entry as it was BEFORE its last edit
+           (previous_* fields) - an edited entry re-syncing must rewrite its
+           existing row; treating the mismatch as "not my row" and writing a
+           fresh one is exactly the double-entry bug.
+        3. The entry carries the edited-resync marker but no previous_*
+           values (they don't travel through the cloud, so an entry edited
+           on the other PC arrives without them) - trust its stored
+           excel_row.
+        Anything else: the row belongs to someone else (e.g. rows shifted
+        after a deletion), so the entry may not claim it.
+        """
+        actual = (
+            self._text_key(actual_customer),
+            self._text_key(actual_item),
+            self._text_key(actual_order_id),
+        )
+        current = tuple(self._text_key(entry.get(key, "")) for key in ("customer", "item", "order_id"))
+        if actual == current:
+            return True
+        has_previous = any(
+            str(entry.get(key) or "").strip()
+            for key in ("previous_customer", "previous_item", "previous_order_id")
+        )
+        if has_previous:
+            previous = (
+                self._text_key(entry.get("previous_customer") or entry.get("customer", "")),
+                self._text_key(entry.get("previous_item") or entry.get("item", "")),
+                self._text_key(entry.get("previous_order_id") or entry.get("order_id", "")),
+            )
+            return actual == previous
+        return str(entry.get("excel_sync_error", "")).strip() == EXCEL_RESYNC_AFTER_EDIT_MESSAGE
 
     def _is_blank(self, value: Any) -> bool:
         return value is None or (isinstance(value, str) and not value.strip())

@@ -457,9 +457,9 @@ class DashboardPage(tk.Frame):
             row=0, column=0, sticky="w", pady=(0, 12)
         )
         self.attendance_tree = ttk.Treeview(body, columns=("time", "event", "details"), show="headings")
-        self.attendance_tree.heading("time", text="Time")
-        self.attendance_tree.heading("event", text="Event")
-        self.attendance_tree.heading("details", text="Details")
+        self.attendance_tree.heading("time", text="Time", anchor="w")
+        self.attendance_tree.heading("event", text="Event", anchor="w")
+        self.attendance_tree.heading("details", text="Details", anchor="w")
         self.attendance_tree.column("time", width=120, anchor="w")
         self.attendance_tree.column("event", width=160, anchor="w")
         self.attendance_tree.column("details", width=520, anchor="w")
@@ -577,9 +577,9 @@ class DashboardPage(tk.Frame):
             show="headings",
             selectmode="browse",
         )
-        self.daily_notes_tree.heading("date", text="Date")
-        self.daily_notes_tree.heading("updated", text="Updated")
-        self.daily_notes_tree.heading("preview", text="Preview")
+        self.daily_notes_tree.heading("date", text="Date", anchor="w")
+        self.daily_notes_tree.heading("updated", text="Updated", anchor="w")
+        self.daily_notes_tree.heading("preview", text="Preview", anchor="w")
         self.daily_notes_tree.column("date", width=135, minwidth=120, anchor="w", stretch=False)
         self.daily_notes_tree.column("updated", width=145, minwidth=130, anchor="w", stretch=False)
         self.daily_notes_tree.column("preview", width=620, minwidth=260, anchor="w", stretch=True)
@@ -2139,19 +2139,73 @@ class DashboardPage(tk.Frame):
 
     def _refresh_recent_activity(self) -> None:
         self.recent_list.delete(0, tk.END)
-        items: list[str] = []
-        for entry in self.sales_entries[-5:]:
+        # A true activity feed: TODAY's sales and attendance events merged
+        # chronologically, newest on top. The old version appended the two
+        # lists and reversed them, which put attendance on top no matter
+        # what actually happened last, silently squeezed sales out of the
+        # 8-item cut, and followed the selected day card instead of today.
+        now = datetime.now()
+        today = self._sales_date()
+        feed: list[tuple[datetime, str, str]] = []
+        for entry in self._sales_entries_for_date(today):
+            moment = self._sale_moment(entry, today, now)
+            if moment is None:
+                continue
             display_number = self._sales_entry_display_number(entry)
-            items.append(
-                f"{entry['time']} - Sale #{display_number}: {entry['item']} - Rs. {money_label(entry['selling_amount'])}"
-            )
-        for event in self.attendance_events[-5:]:
-            items.append(f"{self._format_event_time(event['event_time'])} - {event['event_label']}")
-        if not items:
+            customer = str(entry.get("customer", "")).strip()
+            customer_part = f" - {customer}" if customer else ""
+            feed.append((
+                moment,
+                "sale",
+                f"{entry['time']} - Sale #{display_number}: {entry['item']}{customer_part}"
+                f" - Rs. {money_label(entry['selling_amount'])}",
+            ))
+        for event in self.attendance_events:
+            try:
+                moment = parse_local_datetime(event["event_time"])
+            except ValueError:
+                continue
+            kind = "break" if str(event.get("event_type", "")).startswith("break") else "attendance"
+            feed.append((moment, kind, f"{self._format_event_time(event['event_time'])} - {event['event_label']}"))
+
+        if not feed:
             self.recent_list.insert(tk.END, "No activity yet today.")
+            self.recent_list.itemconfig(0, foreground=MUTED)
             return
-        for item in items[-8:][::-1]:
-            self.recent_list.insert(tk.END, item)
+
+        feed.sort(key=lambda item: item[0], reverse=True)
+        colors = {"sale": SUCCESS, "break": WARNING, "attendance": BLUE}
+        for index, (moment, kind, text) in enumerate(feed[:8]):
+            if index == 0:
+                text = f"{text}   ({self._relative_time_label(moment, now)})"
+            self.recent_list.insert(tk.END, text)
+            self.recent_list.itemconfig(index, foreground=colors.get(kind, TEXT))
+
+    def _sale_moment(self, entry: dict[str, str], today: str, now: datetime) -> datetime | None:
+        # created_at is the real moment the entry was saved and is the only
+        # value that stays correct when a business day runs past midnight -
+        # a 01:00 AM sale carries yesterday's business date, so parsing
+        # "date + time" would sort it a full day too old.
+        created = str(entry.get("created_at") or "")
+        if created:
+            try:
+                return parse_local_datetime(created)
+            except ValueError:
+                pass
+        try:
+            moment = datetime.strptime(f"{entry.get('date') or today} {entry['time']}", "%Y-%m-%d %I:%M %p")
+        except (KeyError, ValueError):
+            return None
+        return min(moment, now)
+
+    def _relative_time_label(self, moment: datetime, now: datetime) -> str:
+        seconds = max(0, int((now - moment).total_seconds()))
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} min ago"
+        return f"{minutes // 60} h ago"
 
     def _refresh_notification_badge(self) -> None:
         if self.notification_badge is None:
