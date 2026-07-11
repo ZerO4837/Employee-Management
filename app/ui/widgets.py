@@ -464,32 +464,133 @@ def _fit_combo_popdown(combo: ttk.Combobox) -> None:
             pass
 
     combo.tk.call("bind", popdown, "<Map>", "+" + str(combo.register(_widen)))
+    # Exposed so the type-to-filter logic can re-apply the width after it
+    # re-posts an already-open popdown (re-posting re-applies the stock
+    # narrow geometry, and <Map> only fires on the first open).
+    combo.widen_popdown = _widen
 
 
 def _enable_combo_search(combo: ttk.Combobox) -> None:
     """Let the user type into the combobox to filter the dropdown list.
 
     Typing narrows the list to values starting with the typed text
-    (case-insensitive), so "a" leaves only the Adobe entries in a long
-    service list. Clearing the text, picking a value, or leaving the field
-    restores the full list. Values reconfigured externally (e.g. a service
-    catalog refresh) are picked up as the new full list automatically.
+    (case-insensitive) and OPENS the dropdown right away so the matches are
+    visible while typing - no need to click the arrow. Clearing the text,
+    picking a value, or leaving the field restores the full list. Values
+    reconfigured externally (e.g. a service catalog refresh) are picked up
+    as the new full list automatically.
     """
+    popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+    popdown_listbox = f"{popdown}.f.l"
     state: dict[str, list[str] | None] = {
         "full": [str(value) for value in (combo.cget("values") or ())],
         "filtered": None,
     }
+
+    def _popdown_open() -> bool:
+        try:
+            return bool(int(combo.tk.call("winfo", "ismapped", popdown)))
+        except tk.TclError:
+            return False
 
     def _sync_full() -> None:
         current = [str(value) for value in (combo.cget("values") or ())]
         if state["filtered"] is None or current != state["filtered"]:
             state["full"] = current
 
-    def _restore(_event: tk.Event | None = None) -> None:
+    def _restore_full_values() -> None:
         _sync_full()
         if state["filtered"] is not None:
+            # Reconfiguring -values makes Tk rewrite the displayed text to
+            # the value at the remembered current INDEX - which points at a
+            # different item once the filtered list is swapped for the full
+            # one (picking "Capcut..." at filtered index 0 turned into the
+            # full list's index 0, "5G IPTV..."). Preserve the text.
+            text = combo.get()
             combo.configure(values=state["full"])
             state["filtered"] = None
+            if combo.get() != text:
+                combo.set(text)
+
+    def _on_selected(_event: tk.Event | None = None) -> None:
+        _restore_full_values()
+
+    def _interacting_with_popdown() -> bool:
+        # A click inside the suggestion list (or Down-key focus handoff)
+        # fires FocusOut on the entry BEFORE the selection completes -
+        # closing/restoring at that moment kills the selection mid-click.
+        try:
+            if str(combo.tk.call("focus")).startswith(popdown):
+                return True
+            pointer_x = combo.winfo_pointerx()
+            pointer_y = combo.winfo_pointery()
+            under = str(combo.tk.call("winfo", "containing", pointer_x, pointer_y))
+            return under.startswith(popdown)
+        except tk.TclError:
+            return False
+
+    def _on_focus_out(_event: tk.Event | None = None) -> None:
+        # Leaving the field closes the list and brings the full set back
+        # for the next open.
+        if _interacting_with_popdown():
+            return
+        if _popdown_open():
+            try:
+                combo.tk.call("ttk::combobox::Unpost", combo)
+            except tk.TclError:
+                pass
+        _restore_full_values()
+
+    # The popup list normally steals keyboard focus the moment it appears
+    # (class binding: <Map> -> focus -force) and cancels itself as soon as
+    # it loses that focus again (<FocusOut> -> LBCancel). For a
+    # type-to-filter box both behaviors are wrong: focus must STAY in the
+    # text entry while the list is open. A widget-level "break" runs before
+    # the class binding and stops the focus steal - and with the list never
+    # focused, it never self-cancels either. Mouse selection still works
+    # (it doesn't need focus), and pressing Down still hands the list focus
+    # for arrow-key navigation.
+    combo.tk.call("bind", popdown_listbox, "<Map>", "break")
+
+    def _lb_click_select(x: str, y: str) -> None:
+        # Select by the TEXT of the clicked item. The stock handler selects
+        # by index into the combobox -values, which points at the wrong
+        # item whenever the values were swapped between press and release
+        # (e.g. clicking "Capcut..." at filtered index 0 used to come back
+        # as the full list's index 0, "5G IPTV...").
+        try:
+            index = combo.tk.call(popdown_listbox, "index", f"@{x},{y}")
+            text = str(combo.tk.call(popdown_listbox, "get", index))
+        except tk.TclError:
+            text = ""
+        _close_list()
+        if text:
+            combo.set(text)
+            combo.icursor("end")
+            combo.event_generate("<<ComboboxSelected>>")
+
+    # Widget-level binding runs before the class one; the trailing "break"
+    # suppresses the stock index-based selection entirely.
+    combo.tk.call(
+        "bind",
+        popdown_listbox,
+        "<ButtonRelease-1>",
+        f"{combo.register(_lb_click_select)} %x %y\nbreak",
+    )
+
+    def _show_matches() -> None:
+        # (Re)post on every keystroke: Post copies the combobox's current
+        # -values into the popup list AND recomputes the list height and
+        # placement. Without the re-post, a popup opened while one item
+        # matched stayed one row tall forever - backspacing to a broader
+        # search showed just the first match with the rest hidden.
+        try:
+            combo.tk.call("ttk::combobox::Post", combo)
+        except tk.TclError:
+            return
+        widen = getattr(combo, "widen_popdown", None)
+        if callable(widen):
+            widen()
 
     def _filter(event: tk.Event) -> None:
         if event.keysym in {"Up", "Down", "Return", "Escape", "Tab", "Left", "Right", "Home", "End"}:
@@ -504,10 +605,46 @@ def _enable_combo_search(combo: ttk.Combobox) -> None:
             filtered = full
         combo.configure(values=filtered)
         state["filtered"] = filtered if filtered != full else None
+        _show_matches()
+
+    def _hand_focus_to_list(_event: tk.Event | None = None) -> str | None:
+        # Deliberate arrow-key navigation: Down while the list is open moves
+        # focus into it, restoring the stock keyboard behavior on demand.
+        # "break" stops the class binding from re-posting over the handoff.
+        if not _popdown_open():
+            return None
+        try:
+            combo.tk.call("focus", popdown_listbox)
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _close_list(_event: tk.Event | None = None) -> None:
+        if _popdown_open():
+            try:
+                combo.tk.call("ttk::combobox::Unpost", combo)
+            except tk.TclError:
+                pass
+
+    def _select_first_match(_event: tk.Event | None = None) -> str | None:
+        # Enter while the suggestion list is open picks the top match.
+        if not _popdown_open():
+            return None
+        values = [str(value) for value in (combo.cget("values") or ())]
+        _close_list()
+        if not values:
+            return "break"
+        combo.set(values[0])
+        combo.icursor("end")
+        combo.event_generate("<<ComboboxSelected>>")
+        return "break"
 
     combo.bind("<KeyRelease>", _filter, add="+")
-    combo.bind("<<ComboboxSelected>>", _restore, add="+")
-    combo.bind("<FocusOut>", _restore, add="+")
+    combo.bind("<<ComboboxSelected>>", _on_selected, add="+")
+    combo.bind("<FocusOut>", _on_focus_out, add="+")
+    combo.bind("<Down>", _hand_focus_to_list, add="+")
+    combo.bind("<Escape>", _close_list, add="+")
+    combo.bind("<Return>", _select_first_match, add="+")
 
 
 def status_pill(parent: tk.Misc, text: str, fg: str = BLUE, bg: str = "#eef6ff") -> tk.Label:

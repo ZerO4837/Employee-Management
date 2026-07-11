@@ -1441,16 +1441,37 @@ class DashboardPage(tk.Frame):
         return self.app.attendance_store.list_service_names(include_other=True)
 
     def _refresh_service_catalog_values(self) -> None:
+        if self.sales_item_combo is None:
+            return
+        # This runs after every action and on background sync ticks. Never
+        # fight the employee mid-search: resetting the box while they type
+        # wiped a half-typed filter back to the first catalog item, and
+        # converted partial text like "capcut" into a bogus "Other" service.
+        try:
+            focus_widget = self.focus_get()
+        except (KeyError, tk.TclError):
+            # focus_get raises for foreign widgets like the dropdown's own
+            # popup list - which means the user is picking a value right now.
+            return
+        if focus_widget is self.sales_item_combo:
+            return
         values = self._sales_item_values()
-        if self.sales_item_combo is not None:
-            self.sales_item_combo.configure(values=values)
-            current = self.sales_vars.get("item").get() if self.sales_vars.get("item") is not None else ""
-            if current and current not in values and current != "Other":
+        self.sales_item_combo.configure(values=values)
+        current = self.sales_vars.get("item").get() if self.sales_vars.get("item") is not None else ""
+        if current and current not in values and current != "Other":
+            lowered = current.lower()
+            if any(value.lower().startswith(lowered) for value in values):
+                # An abandoned half-typed search (e.g. "cap") - reset to the
+                # default instead of promoting it to a bogus Other service.
+                self.sales_vars["item"].set(values[0] if values else "")
+            else:
+                # A value that genuinely left the catalog: keep the sale
+                # possible through the Other flow.
                 self.item_other_var.set(current)
                 self.sales_vars["item"].set("Other")
-            elif not current and values:
-                self.sales_vars["item"].set(values[0])
-            self._update_item_other_visibility()
+        elif not current and values:
+            self.sales_vars["item"].set(values[0])
+        self._update_item_other_visibility()
 
     def _refresh_service_message_templates(self) -> None:
         self.service_message_templates = self.app.attendance_store.list_service_message_templates(limit=300)
