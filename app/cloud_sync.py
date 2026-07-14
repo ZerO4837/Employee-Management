@@ -205,6 +205,11 @@ class CloudSyncService:
                     jobs.append(lambda: self._pull_employee_users(client, config.user_sync_secret))
                     jobs.append(lambda: self._pull_inventory_items(client, config.user_sync_secret))
                     jobs.append(lambda: self._pull_app_settings(client, config.user_sync_secret))
+                if config.can_pull_users and not config.can_push:
+                    # Employee PCs (no admin secret): pull sales entries via
+                    # the employee-gated RPC so admin edits reflect back.
+                    # The admin PC keeps using the admin-gated pull below.
+                    jobs.append(lambda: self._pull_sales_entries_shared(client, config.user_sync_secret))
                 if config.can_push:
                     jobs.append(lambda: self._pull_attendance_days(client, config.admin_secret))
                     jobs.append(lambda: self._pull_attendance_shifts(client, config.admin_secret))
@@ -467,6 +472,27 @@ class CloudSyncService:
 
     def _pull_sales_entries(self, client: SupabaseRestClient, admin_secret: str) -> int:
         rows = client.rpc("dsp_list_sales_entries", {"admin_secret": admin_secret})
+        if not isinstance(rows, list):
+            return 0
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_sales_entry(row):
+                changed += 1
+        return changed
+
+    def _pull_sales_entries_shared(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        # Employee-secret pull so admin-side edits to sales data flow back
+        # to employee PCs (they never hold the admin secret). Tolerates the
+        # RPC not existing yet: on a Supabase project where
+        # dsp_list_sales_entries_shared hasn't been created, employees just
+        # keep the old push-only behavior instead of failing every sync.
+        try:
+            rows = client.rpc("dsp_list_sales_entries_shared", {"sync_secret": sync_secret})
+        except Exception as exc:
+            message = str(exc).lower()
+            if "dsp_list_sales_entries_shared" in message or "pgrst202" in message or "404" in message:
+                return 0
+            raise
         if not isinstance(rows, list):
             return 0
         changed = 0

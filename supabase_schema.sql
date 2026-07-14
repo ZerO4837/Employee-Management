@@ -1005,10 +1005,53 @@ begin
 end;
 $$;
 
+-- Employee-secret variant of dsp_list_sales_entries, so admin-side edits to
+-- sales data flow BACK to employee PCs (which only hold the employee sync
+-- secret). Same rows the employees push themselves - no extra exposure.
+create or replace function public.dsp_list_sales_entries_shared(sync_secret text)
+returns table (
+  cloud_id text,
+  employee_username text,
+  entry_date date,
+  entry_time text,
+  customer text,
+  item text,
+  order_id text,
+  buying_amount text,
+  selling_amount text,
+  profit text,
+  status text,
+  notes text,
+  excel_row integer,
+  excel_synced_at text,
+  excel_sync_error text,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.dsp_employee_sync_secret_valid(sync_secret) then
+    raise exception 'Invalid employee sync secret' using errcode = '28000';
+  end if;
+
+  return query
+  select s.cloud_id, s.employee_username, s.entry_date, s.entry_time, s.customer, s.item, s.order_id,
+         s.buying_amount, s.selling_amount, s.profit, s.status, s.notes,
+         s.excel_row, s.excel_synced_at, s.excel_sync_error, s.created_at, s.updated_at
+  from public.dsp_sales_entries s
+  order by s.entry_date desc, s.updated_at desc
+  limit 5000;
+end;
+$$;
+
 grant execute on function public.dsp_upsert_app_setting(text, jsonb) to anon;
 grant execute on function public.dsp_list_app_settings(text) to anon;
 grant execute on function public.dsp_upsert_sales_entry(text, jsonb) to anon;
 grant execute on function public.dsp_list_sales_entries(text) to anon;
+grant execute on function public.dsp_list_sales_entries_shared(text) to anon;
 grant execute on function public.dsp_upsert_service_message_template(text, jsonb) to anon;
 
 -- Lets the admin panel delete a stuck/test attendance shift permanently

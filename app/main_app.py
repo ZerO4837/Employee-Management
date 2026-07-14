@@ -380,6 +380,14 @@ class EmployeeApp(tk.Tk):
                 page._refresh_service_catalog_values()
                 page._refresh_service_message_templates()
                 page._refresh_inventory_items()
+                # Sales entries can change from the OTHER side now (the
+                # admin can add/edit entries) - without this, an admin edit
+                # arrives in the local database but the employee's tables
+                # keep showing the old values until some manual action.
+                page._refresh_sales_entries_from_store()
+                page._refresh_today_table()
+                page._refresh_sales_sidebar(page._sales_entries_for_date(page._sales_date()))
+                page._refresh_recent_activity()
                 if page.notification_dropdown is not None and page.notification_dropdown.winfo_ismapped():
                     page.notification_dropdown.refresh()
             elif isinstance(page, AdminPage):
