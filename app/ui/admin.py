@@ -3370,6 +3370,10 @@ class AdminAddEntryWindow(tk.Toplevel):
             messagebox.showerror("Missing status reason", "Please write the reason for Other status.", parent=self)
             return
         entry["status"] = resolved_status
+        # Rides the notes field (already cloud-synced both ways), so the
+        # employee's table shows who touched the entry. Deliberately the
+        # word "Admin", not the admin account's username.
+        entry["notes"] = "Edited by Admin" if editing else "Added by Admin"
 
         if editing:
             # update_sales_entry flags the entry for a fresh Excel sync on

@@ -282,6 +282,68 @@ def make_button(
     return button
 
 
+def add_tooltip(widget: tk.Widget, text_provider) -> None:
+    """Show a small dark tooltip beside the widget after a short hover pause.
+
+    text_provider is called at show time; returning an empty string skips
+    the tooltip - used for buttons that only need explaining while they are
+    icon-only (collapsed sidebar).
+    """
+    state: dict[str, object] = {"after": None, "window": None}
+
+    def _hide(_event: tk.Event | None = None) -> None:
+        if state["after"] is not None:
+            try:
+                widget.after_cancel(state["after"])
+            except tk.TclError:
+                pass
+            state["after"] = None
+        window = state["window"]
+        state["window"] = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def _show() -> None:
+        state["after"] = None
+        try:
+            text = str(text_provider() or "")
+            if not text or not widget.winfo_ismapped():
+                return
+        except tk.TclError:
+            return
+        window = tk.Toplevel(widget)
+        try:
+            # Hidden until fully positioned - otherwise a failure between
+            # creation and geometry leaves a stray unstyled window floating
+            # at the top-left of the screen.
+            window.withdraw()
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            label = tk.Label(window, text=text, bg=NAVY, fg=WHITE, font=(FONT, 9), padx=10, pady=5)
+            label.pack()
+            x = widget.winfo_rootx() + widget.winfo_width() + 10
+            y = widget.winfo_rooty() + (widget.winfo_height() - label.winfo_reqheight()) // 2
+            window.geometry(f"+{x}+{y}")
+            window.deiconify()
+            state["window"] = window
+        except tk.TclError:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def _schedule(_event: tk.Event | None = None) -> None:
+        _hide()
+        state["after"] = widget.after(450, _show)
+
+    widget.bind("<Enter>", _schedule, add="+")
+    widget.bind("<Leave>", _hide, add="+")
+    widget.bind("<ButtonPress>", _hide, add="+")
+
+
 def set_button_enabled(button: tk.Button, enabled: bool) -> None:
     if enabled:
         button.configure(

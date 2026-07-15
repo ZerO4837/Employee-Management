@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 from app.config import (
     BG,
@@ -37,6 +37,7 @@ from app.ui.widgets import (
     GradientBanner,
     MetricCard,
     SurfaceCard,
+    add_tooltip,
     combo_box,
     field_label,
     make_button,
@@ -70,6 +71,30 @@ def _amount_value_valid(value: str) -> bool:
 
 class DashboardPage(tk.Frame):
     SHIFT_LOCKED_VIEWS = {"inventory", "sales", "today"}
+    # Segoe MDL2 Assets: the Windows 10 system icon font - the same crisp
+    # icons Windows itself uses (Home, Clock, Mail, Shopping Cart...).
+    MDL2_ICON_FONT = "Segoe MDL2 Assets"
+    MDL2_NAV_ICONS = {
+        "overview": "",    # Home
+        "attendance": "",  # Clock
+        "notes": "",       # Quick note
+        "messages": "",    # Mail
+        "inventory": "",   # Package
+        "sales": "",       # Shopping cart
+        "today": "",       # Calendar
+    }
+    MDL2_MENU_ICON = ""    # Hamburger (GlobalNavButton)
+    MDL2_LOGOUT_ICON = ""  # Switch user
+    # Fallback glyphs for machines without the MDL2 font.
+    FALLBACK_NAV_ICONS = {
+        "overview": "⌂",
+        "attendance": "◷",
+        "notes": "✎",
+        "messages": "✉",
+        "inventory": "▦",
+        "sales": "⊕",
+        "today": "▤",
+    }
     SALES_VISIBLE_DAYS = 5
 
     def __init__(self, parent: tk.Misc, app) -> None:
@@ -77,6 +102,8 @@ class DashboardPage(tk.Frame):
         self.app = app
         self.current_view = ""
         self.nav_buttons: dict[str, tk.Button] = {}
+        self.nav_labels: dict[str, str] = {}
+        self.sidebar_collapsed = False
         self.views: dict[str, tk.Frame] = {}
         self.sales_vars: dict[str, tk.StringVar] = {}
         self.sales_date_var = tk.StringVar()
@@ -149,7 +176,78 @@ class DashboardPage(tk.Frame):
         self.notification_frame: tk.Frame | None = None
         self.shell: tk.Frame | None = None
         self._build()
+        try:
+            if self.app.attendance_store.get_setting("sidebar_collapsed", ""):
+                self._set_sidebar_collapsed(True)
+        except Exception:
+            pass
         self._tick_clock()
+
+    SIDEBAR_EXPANDED_WIDTH = 292
+    SIDEBAR_COLLAPSED_WIDTH = 70
+
+    def toggle_sidebar(self) -> None:
+        self._set_sidebar_collapsed(not self.sidebar_collapsed)
+        try:
+            # Machine-local preference (not in CLOUD_SYNCED_SETTING_KEYS, so
+            # it never syncs to the other PC).
+            self.app.attendance_store.set_setting("sidebar_collapsed", "1" if self.sidebar_collapsed else "")
+        except Exception:
+            pass
+
+    def _set_sidebar_collapsed(self, collapsed: bool) -> None:
+        """Slim icon-only sidebar (~70px) or the full 292px one.
+
+        Collapsing frees roughly a quarter of the window width for the
+        actual content, which matters most on the smaller employee screen.
+        The same buttons are re-labelled in place (icon-only vs text), so
+        all existing state handling - enabled/disabled nav, hover colors,
+        active-view highlight, commands - keeps working untouched.
+
+        The switch is deliberately INSTANT: width animation forced a full
+        window re-layout every frame, which stuttered badly on the employee
+        PC and could even leave half-drawn widgets behind.
+        """
+        self.sidebar_collapsed = collapsed
+        if collapsed:
+            self._apply_collapsed_sidebar_content()
+            self.sidebar.configure(width=self.SIDEBAR_COLLAPSED_WIDTH)
+            return
+        self.sidebar.configure(width=self.SIDEBAR_EXPANDED_WIDTH)
+        self._apply_expanded_sidebar_content()
+
+    def _apply_collapsed_sidebar_content(self) -> None:
+        self.sidebar.configure(padx=8)
+        self.sidebar_brand_card.pack_forget()
+        self.sidebar_workspace_label.pack_forget()
+        self.sidebar_status_card.pack_forget()
+        self.sidebar_toggle_button.configure(anchor="center", padx=0)
+        for key, button in self.nav_buttons.items():
+            button.configure(
+                text=self.nav_icons.get(key, "•"),
+                anchor="center",
+                padx=0,
+                font=self.icon_font,
+            )
+        self.sidebar_logout_button.configure(text=self.logout_icon, anchor="center", padx=0, font=self.icon_font)
+
+    def _apply_expanded_sidebar_content(self) -> None:
+        self.sidebar.configure(padx=16)
+        # Re-pack in the original order: WORKSPACE label first (anchored
+        # before the nav list), then the brand card above it, and the shift
+        # status card back above the logout button.
+        self.sidebar_workspace_label.pack(anchor="w", padx=4, pady=(2, 8), before=self.sidebar_nav_container)
+        self.sidebar_brand_card.pack(fill="x", pady=(0, 18), before=self.sidebar_workspace_label)
+        self.sidebar_status_card.pack(fill="x", pady=(18, 12), before=self.sidebar_logout_button)
+        self.sidebar_toggle_button.configure(anchor="w", padx=14)
+        for key, button in self.nav_buttons.items():
+            button.configure(
+                text=self.nav_labels.get(key, key),
+                anchor="w",
+                padx=14,
+                font=(FONT_BOLD, 10),
+            )
+        self.sidebar_logout_button.configure(text="Logout", anchor="center", padx=14, font=(FONT_BOLD, 10))
 
     def _build(self) -> None:
         self.grid_columnconfigure(1, weight=1)
@@ -158,6 +256,29 @@ class DashboardPage(tk.Frame):
         sidebar = tk.Frame(self, bg=SIDEBAR_BG, width=292, padx=16, pady=20)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
+        self.sidebar = sidebar
+
+        # Prefer the native Windows icon font; fall back to plain symbol
+        # glyphs on machines that don't ship it.
+        try:
+            families = set(tkfont.families(self))
+        except tk.TclError:
+            families = set()
+        if self.MDL2_ICON_FONT in families:
+            self.nav_icons = dict(self.MDL2_NAV_ICONS)
+            self.menu_icon = self.MDL2_MENU_ICON
+            self.logout_icon = self.MDL2_LOGOUT_ICON
+            self.icon_font = (self.MDL2_ICON_FONT, 12)
+        else:
+            self.nav_icons = dict(self.FALLBACK_NAV_ICONS)
+            self.menu_icon = "☰"
+            self.logout_icon = "➔"
+            self.icon_font = (FONT_BOLD, 13)
+
+        self.sidebar_toggle_button = make_button(sidebar, self.menu_icon, self.toggle_sidebar, "sidebar", anchor="w")
+        self.sidebar_toggle_button.configure(font=self.icon_font)
+        self.sidebar_toggle_button.pack(fill="x", pady=(0, 12))
+        add_tooltip(self.sidebar_toggle_button, lambda: "Show menu" if self.sidebar_collapsed else "Hide menu")
 
         brand_card = tk.Frame(
             sidebar,
@@ -168,6 +289,7 @@ class DashboardPage(tk.Frame):
             highlightthickness=1,
         )
         brand_card.pack(fill="x", pady=(0, 18))
+        self.sidebar_brand_card = brand_card
 
         GradientBand(brand_card, start=BLUE, end=TEAL, height=3).pack(fill="x", pady=(0, 14))
 
@@ -197,17 +319,19 @@ class DashboardPage(tk.Frame):
             font=(FONT, 9),
         ).pack(anchor="w", pady=(4, 0))
 
-        tk.Label(
+        self.sidebar_workspace_label = tk.Label(
             sidebar,
             text="WORKSPACE",
             bg=SIDEBAR_BG,
             fg=SIDEBAR_MUTED,
             font=(FONT_BOLD, 8),
-        ).pack(anchor="w", padx=4, pady=(2, 8))
+        )
+        self.sidebar_workspace_label.pack(anchor="w", padx=4, pady=(2, 8))
 
         nav_container = tk.Frame(sidebar, bg=SIDEBAR_BG)
         nav_container.pack(fill="x")
         nav_container.grid_columnconfigure(0, weight=1)
+        self.sidebar_nav_container = nav_container
 
         nav_items = [
             ("overview", "Dashboard"),
@@ -219,9 +343,20 @@ class DashboardPage(tk.Frame):
             ("today", "5-Day Data"),
         ]
         for index, (key, label) in enumerate(nav_items):
-            button = make_button(nav_container, label, lambda view=key: self.show_view(view), "sidebar", anchor="w")
+            self.nav_labels[key] = label
+            button = make_button(
+                nav_container,
+                label,
+                lambda view=key: self.show_view(view),
+                "sidebar",
+                anchor="w",
+            )
             button.grid(row=index, column=0, sticky="ew", pady=4)
             self.nav_buttons[key] = button
+            # Tooltip only while the sidebar is icon-only; when expanded the
+            # label is right there, so the provider returns "" and no
+            # tooltip appears.
+            add_tooltip(button, lambda view=key: self.nav_labels[view] if self.sidebar_collapsed else "")
             if key in self.SHIFT_LOCKED_VIEWS:
                 self.shift_required_buttons.append(button)
 
@@ -236,12 +371,15 @@ class DashboardPage(tk.Frame):
             highlightthickness=1,
         )
         status_card.pack(fill="x", pady=(18, 12))
+        self.sidebar_status_card = status_card
         tk.Label(status_card, text="Shift Status", bg=SIDEBAR_SURFACE, fg=SIDEBAR_MUTED, font=(FONT_BOLD, 8)).pack(
             anchor="w", pady=(0, 8)
         )
         self.shift_pill = status_pill(status_card, "Not checked in", fg=BLUE_DARK, bg="#eaf2ff")
         self.shift_pill.pack(fill="x")
-        make_button(sidebar, "Logout", self.app.logout, "sidebar_active").pack(fill="x")
+        self.sidebar_logout_button = make_button(sidebar, "Logout", self.app.logout, "sidebar_active")
+        self.sidebar_logout_button.pack(fill="x")
+        add_tooltip(self.sidebar_logout_button, lambda: "Logout" if self.sidebar_collapsed else "")
 
         shell = tk.Frame(self, bg=BG)
         self.shell = shell
@@ -1009,7 +1147,7 @@ class DashboardPage(tk.Frame):
         search_entry.pack(side="left", ipady=5)
         self.sales_search_var.trace_add("write", lambda *_args: self._refresh_today_table())
 
-        columns = ("id", "time", "customer", "item", "email_order", "buying", "selling", "status")
+        columns = ("id", "time", "customer", "item", "email_order", "buying", "selling", "status", "note")
         self.today_tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
         headings = {
             "id": "ID",
@@ -1020,6 +1158,7 @@ class DashboardPage(tk.Frame):
             "buying": "Buying",
             "selling": "Selling",
             "status": "Status",
+            "note": "Note",
         }
         widths = {
             "id": 58,
@@ -1030,6 +1169,7 @@ class DashboardPage(tk.Frame):
             "buying": 105,
             "selling": 105,
             "status": 190,
+            "note": 140,
         }
         for column in columns:
             self.today_tree.heading(column, text=headings[column], anchor="w")
@@ -2134,6 +2274,7 @@ class DashboardPage(tk.Frame):
                     money_label(entry["buying_amount"]),
                     money_label(entry["selling_amount"]),
                     entry["status"],
+                    str(entry.get("notes", "") or ""),
                 ),
             )
 
@@ -2175,11 +2316,13 @@ class DashboardPage(tk.Frame):
             display_number = self._sales_entry_display_number(entry)
             customer = str(entry.get("customer", "")).strip()
             customer_part = f" - {customer}" if customer else ""
+            note = str(entry.get("notes", "") or "").strip()
+            admin_part = " (by Admin)" if note in {"Added by Admin", "Edited by Admin"} else ""
             feed.append((
                 moment,
                 "sale",
                 f"{entry['time']} - Sale #{display_number}: {entry['item']}{customer_part}"
-                f" - Rs. {money_label(entry['selling_amount'])}",
+                f" - Rs. {money_label(entry['selling_amount'])}{admin_part}",
             ))
         for event in self.attendance_events:
             try:
