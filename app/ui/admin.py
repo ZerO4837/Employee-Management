@@ -1347,6 +1347,7 @@ class AdminPage(tk.Frame):
             "selling",
             "profit",
             "status",
+            "note",
             "sync",
         )
         self.sales_data_tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="browse")
@@ -1361,6 +1362,7 @@ class AdminPage(tk.Frame):
             "selling": "Selling",
             "profit": "Profit",
             "status": "Status",
+            "note": "Note",
             "sync": "Excel Sync",
         }
         widths = {
@@ -1374,6 +1376,7 @@ class AdminPage(tk.Frame):
             "selling": 88,
             "profit": 88,
             "status": 130,
+            "note": 145,
             "sync": 120,
         }
         for column in columns:
@@ -2566,6 +2569,7 @@ class AdminPage(tk.Frame):
                     money_label(str(entry.get("selling_amount", ""))),
                     money_label(str(entry.get("profit", ""))),
                     entry.get("status", ""),
+                    str(entry.get("notes", "") or ""),
                     sync_label,
                 ),
             )
@@ -3390,6 +3394,16 @@ class AdminAddEntryWindow(tk.Toplevel):
             self.app.attendance_store.mark_sales_excel_error(int(saved["id"]), employee, EXCEL_SYNC_PENDING_MESSAGE)
             message = f"Sales entry for {employee} on {entry_date} was added."
             title = "Entry added"
+            # The employee panel only lists entries booked under that
+            # employee's own username - an entry left on the Admin account
+            # is visible here in Sales Data but on no employee's screen.
+            employee_only = {user["username"] for user in self.app.auth.list_users(include_admin=False)}
+            if employee not in employee_only:
+                message += (
+                    "\n\nNote: it is booked under the Admin account, so it will NOT "
+                    "appear on any employee's panel. Pick the employee in the "
+                    "Employee box if it should show on their screen."
+                )
         self.admin_page.refresh_all()
         self.app.request_cloud_sync(push_local=True)
         show_app_alert(self.admin_page, title, message, "success")

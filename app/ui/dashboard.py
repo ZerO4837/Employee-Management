@@ -1169,7 +1169,7 @@ class DashboardPage(tk.Frame):
             "buying": 105,
             "selling": 105,
             "status": 190,
-            "note": 140,
+            "note": 175,
         }
         for column in columns:
             self.today_tree.heading(column, text=headings[column], anchor="w")
@@ -2533,20 +2533,24 @@ class DashboardPage(tk.Frame):
             self.show_view("overview")
 
     def clear_sales_form(self) -> None:
+        # Full reset: the service dropdown goes back to the first catalog
+        # item and the Other Service Name box empties. (This used to keep
+        # both "for convenience", which read as the Clear Form button doing
+        # nothing and made every submit leak the previous service into the
+        # next entry.)
         if not self._require_shift_active():
             return
-        selected_item = self.sales_vars.get("item").get() if self.sales_vars.get("item") is not None else ""
-        other_item = self.item_other_var.get()
+        item_values = self._sales_item_values()
         for key, variable in self.sales_vars.items():
             if key == "buying_amount":
                 variable.set("0")
             elif key == "status":
                 variable.set("Done")
             elif key == "item":
-                variable.set(selected_item)
+                variable.set(item_values[0] if item_values else "")
             else:
                 variable.set("")
-        self.item_other_var.set(other_item)
+        self.item_other_var.set("")
         self.status_other_var.set("")
         self._update_item_other_visibility()
         self._update_status_other_visibility()
