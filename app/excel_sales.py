@@ -10,7 +10,7 @@ import tempfile
 from typing import Any
 from zipfile import is_zipfile
 
-from app.config import SALES_EXCEL_DATE_FORMAT, SALES_WORKBOOK_PATH, SALES_WORKSHEET_NAME
+from app.config import SALES_EXCEL_DATE_FORMAT, SALES_WORKBOOK_PATH, SALES_WORKSHEET_NAME, SCREEN_SERVICE_LIMITS
 from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE
 
 
@@ -40,12 +40,9 @@ class SalesWorkbook:
         "Date",
     )
     ENTRY_DATA_COLUMNS = (1, 2, 3, 4, 5, 7)
-    SCREEN_SERVICE_LIMITS = {
-        "netflix screen": 5,
-        "netflix screens": 5,
-        "hbo max screen": 9,
-        "hbo max screens": 9,
-    }
+    # Sourced from config so Excel row-grouping and the data-entry
+    # validation always share one definition.
+    SCREEN_SERVICE_LIMITS = SCREEN_SERVICE_LIMITS
 
     def __init__(self, path: Path | str = SALES_WORKBOOK_PATH, worksheet_name: str = SALES_WORKSHEET_NAME) -> None:
         self.target = os.path.expandvars(str(path)).strip()

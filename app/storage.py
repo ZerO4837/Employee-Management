@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from app.config import SALES_SERVICE_NAMES
+from app.config import SALES_SERVICE_NAMES, screen_service_limit
 from app.utils import (
     FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
     is_future_timestamp,
@@ -3075,6 +3075,73 @@ class AttendanceStore:
                 tuple(params),
             )
         return int(cursor.rowcount)
+
+    def screen_account_customer_count(
+        self,
+        item: str,
+        order_id: str,
+        customer: str = "",
+        exclude_entry_id: int | None = None,
+    ) -> tuple[int | None, int, bool]:
+        """Capacity check for a screen-shared account email.
+
+        Mirrors the Excel row-grouping: distinct customer NAMES per
+        (screen service, account email). Returns
+        (limit, distinct_other_customers, customer_already_present):
+          - limit: the per-account name cap, or None if this service is not
+            a limited screen service or has no account email.
+          - distinct_other_customers: how many different customers already
+            hold a screen on this account (excluding the entry being edited
+            and excluding `customer`).
+          - customer_already_present: True if `customer` already has a
+            screen on the account, in which case reassigning is a no-op and
+            must never be blocked.
+        """
+        limit = screen_service_limit(item)
+        order_id_key = str(order_id or "").strip().casefold()
+        if limit is None or not order_id_key:
+            return None, 0, False
+        item_key = str(item or "").strip().casefold()
+        customer_key = str(customer or "").strip().casefold()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, customer FROM sales_entries WHERE LOWER(TRIM(item)) = ? AND LOWER(TRIM(order_id)) = ?",
+                (item_key, order_id_key),
+            ).fetchall()
+        others: set[str] = set()
+        already_present = False
+        for row in rows:
+            if exclude_entry_id is not None and int(row["id"]) == int(exclude_entry_id):
+                continue
+            name_key = str(row["customer"] or "").strip().casefold()
+            if not name_key:
+                continue
+            if customer_key and name_key == customer_key:
+                already_present = True
+                continue
+            others.add(name_key)
+        return limit, len(others), already_present
+
+    def screen_account_blocked_message(
+        self,
+        item: str,
+        order_id: str,
+        customer: str = "",
+        exclude_entry_id: int | None = None,
+    ) -> str | None:
+        """User-facing reason if assigning this customer to this screen
+        account would exceed the per-account limit, else None (allowed)."""
+        limit, used, already_present = self.screen_account_customer_count(
+            item, order_id, customer, exclude_entry_id
+        )
+        if limit is None or already_present or used < limit:
+            return None
+        service = str(item or "This account").strip()
+        email = str(order_id or "").strip()
+        return (
+            f"{service} account is already full ({limit} customers per account): "
+            f"{email}\n\nPlease use a different account email for this customer."
+        )
 
     def delete_sales_entry(self, entry_id: int, employee_username: str) -> None:
         with self.connect() as connection:

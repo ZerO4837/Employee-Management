@@ -3374,6 +3374,16 @@ class AdminAddEntryWindow(tk.Toplevel):
             messagebox.showerror("Missing status reason", "Please write the reason for Other status.", parent=self)
             return
         entry["status"] = resolved_status
+        # Netflix/HBO per-account limit - enforced on both add and edit. On
+        # an edit, the entry being changed is excluded from the count so a
+        # customer already on the account isn't blocked by their own row.
+        exclude_id = int(self.entry["id"]) if editing else None
+        full_message = self.app.attendance_store.screen_account_blocked_message(
+            entry["item"], entry["order_id"], entry["customer"], exclude_entry_id=exclude_id
+        )
+        if full_message:
+            messagebox.showerror("Account is full", full_message, parent=self)
+            return
         # Rides the notes field (already cloud-synced both ways), so the
         # employee's table shows who touched the entry. Deliberately the
         # word "Admin", not the admin account's username.

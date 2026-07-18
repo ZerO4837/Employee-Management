@@ -2592,6 +2592,13 @@ class DashboardPage(tk.Frame):
             return
         entry["status"] = resolved_status
 
+        full_message = self.app.attendance_store.screen_account_blocked_message(
+            entry["item"], entry["order_id"], entry["customer"]
+        )
+        if full_message:
+            messagebox.showerror("Account is full", full_message)
+            return
+
         entry["date"] = self._sales_date()
         entry["time"] = now_label()
         saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
@@ -2850,6 +2857,15 @@ class EditEntryWindow(tk.Toplevel):
             messagebox.showerror("Missing status reason", "Please write the reason for Other status.")
             return
         updates["status"] = resolved_status
+        # Enforce the Netflix/HBO per-account limit on edits too - this is
+        # the path where an out-of-stock entry gets its account email filled
+        # in after a restock, which previously bypassed the check entirely.
+        full_message = self.dashboard.app.attendance_store.screen_account_blocked_message(
+            updates["item"], updates["order_id"], updates["customer"], exclude_entry_id=int(self.entry["id"])
+        )
+        if full_message:
+            messagebox.showerror("Account is full", full_message)
+            return
         original_entry = dict(self.entry)
         updated = self.dashboard.app.attendance_store.update_sales_entry(
             int(self.entry["id"]),

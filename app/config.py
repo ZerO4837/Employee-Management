@@ -7,7 +7,7 @@ import sys
 
 APP_NAME = "Digital Service Pakistan Employee App"
 BUSINESS_NAME = "DIGITAL SERVICE PAKISTAN"
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 UPDATE_REPO_OWNER = os.environ.get("DSP_UPDATE_REPO_OWNER", "ZerO4837")
 UPDATE_REPO_NAME = os.environ.get("DSP_UPDATE_REPO_NAME", "Employee-Management")
 UPDATE_BRANCH = os.environ.get("DSP_UPDATE_BRANCH", "main")
@@ -56,6 +56,21 @@ _sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH", "")
 SALES_WORKBOOK_PATH = Path(os.path.expandvars(_sales_workbook_setting)).expanduser()
 SALES_WORKSHEET_NAME = os.environ.get("DSP_SALES_WORKSHEET_NAME", "").strip()
 SALES_EXCEL_DATE_FORMAT = "d/m/yyyy"
+
+# Screen-shared services: one account email can hold at most this many
+# distinct customer names before it is "full". Keys are casefolded service
+# names. Shared by the Excel row-grouping (excel_sales.py) and the
+# data-entry validation (storage.py) so both enforce the same cap.
+SCREEN_SERVICE_LIMITS = {
+    "netflix screen": 5,
+    "netflix screens": 5,
+    "hbo max screen": 9,
+    "hbo max screens": 9,
+}
+
+
+def screen_service_limit(item: str) -> int | None:
+    return SCREEN_SERVICE_LIMITS.get(str(item or "").strip().casefold())
 
 NAVY = "#07063f"
 NAVY_2 = "#0d1668"
