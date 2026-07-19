@@ -214,9 +214,15 @@ class MetricCard(SurfaceCard):
         helper: str = "",
         **kwargs,
     ) -> None:
-        super().__init__(parent, padx=18, pady=16, accent=True, accent_start=accent_color, accent_end=TEAL, **kwargs)
+        # A SOLID accent band in the card's own color (the old gradient
+        # faded every card to the same teal, which made a row of cards look
+        # identical), plus a matching color dot beside the title.
+        super().__init__(parent, padx=18, pady=16, accent=True, accent_start=accent_color, accent_end=accent_color, **kwargs)
         self.body.grid_columnconfigure(0, weight=1)
-        tk.Label(self.body, text=title, bg=WHITE, fg=MUTED, font=(FONT_BOLD, 10)).grid(row=0, column=0, sticky="w")
+        title_row = tk.Frame(self.body, bg=WHITE)
+        title_row.grid(row=0, column=0, sticky="w")
+        tk.Label(title_row, text="●", bg=WHITE, fg=accent_color, font=(FONT, 8)).pack(side="left", padx=(0, 6))
+        tk.Label(title_row, text=title, bg=WHITE, fg=MUTED, font=(FONT_BOLD, 10)).pack(side="left")
         self.value_label = tk.Label(self.body, text=value, bg=WHITE, fg=accent_color, font=(FONT_BOLD, 22))
         self.value_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.helper_label = tk.Label(self.body, text=helper, bg=WHITE, fg=MUTED, font=(FONT, 9))

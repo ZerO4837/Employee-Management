@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import sqlite3
 import uuid
@@ -43,7 +44,14 @@ _CLOUD_TIMESTAMP_FIELDS = (
 # This must stay an allowlist, not a blocklist: app_settings also holds
 # secrets (the Supabase admin/employee sync secrets themselves) and per-device
 # preferences (remembered login username) that must never leave this PC.
-CLOUD_SYNCED_SETTING_KEYS = frozenset({"sales_workbook_path", "sales_worksheet_name"})
+# Snapshot of screen accounts read directly from the Excel workbook (Scan
+# Excel on the admin dashboard). Cloud-synced so the employee PC's
+# account-full validation also knows about sales typed straight into Excel.
+EXCEL_SCREEN_SNAPSHOT_SETTING = "excel_screen_accounts_snapshot"
+
+CLOUD_SYNCED_SETTING_KEYS = frozenset(
+    {"sales_workbook_path", "sales_worksheet_name", EXCEL_SCREEN_SNAPSHOT_SETTING}
+)
 
 # Sentinel stored in sales_entries.excel_sync_error when an already-synced
 # entry gets edited. Reusing this existing text column (rather than adding a
@@ -3120,7 +3128,119 @@ class AttendanceStore:
                 already_present = True
                 continue
             others.add(name_key)
+        # Names sitting in the workbook itself (Scan Excel snapshot) also
+        # occupy screens - covers sales typed directly into Excel.
+        for name in self._excel_screen_snapshot()[1].get((item_key, order_id_key), {}).get("names", []):
+            name_key = name.strip().casefold()
+            if not name_key:
+                continue
+            if customer_key and name_key == customer_key:
+                already_present = True
+                continue
+            others.add(name_key)
         return limit, len(others), already_present
+
+    def save_excel_screen_snapshot(self, accounts: dict[str, dict]) -> None:
+        payload = {
+            "scanned_at": _iso(),
+            "accounts": [
+                {
+                    "item": str(record.get("item", "")),
+                    "order_id": str(record.get("order_id", "")),
+                    "names": [str(name) for name in record.get("names", [])],
+                }
+                for record in accounts.values()
+            ],
+        }
+        self.set_setting(EXCEL_SCREEN_SNAPSHOT_SETTING, json.dumps(payload))
+
+    def excel_screen_snapshot_scanned_at(self) -> str:
+        return self._excel_screen_snapshot()[0]
+
+    def _excel_screen_snapshot(self) -> tuple[str, dict[tuple[str, str], dict]]:
+        """Parsed Scan Excel snapshot: (scanned_at, {(item_key, email_key):
+        {"item", "order_id", "names": [...]}}). Empty when never scanned."""
+        raw = self.get_setting(EXCEL_SCREEN_SNAPSHOT_SETTING, "")
+        if not raw:
+            return "", {}
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return "", {}
+        snapshot: dict[tuple[str, str], dict] = {}
+        for record in payload.get("accounts", []) if isinstance(payload, dict) else []:
+            item = str(record.get("item", "")).strip()
+            order_id = str(record.get("order_id", "")).strip()
+            if not item or not order_id or screen_service_limit(item) is None:
+                continue
+            names = [str(name).strip() for name in record.get("names", []) if str(name).strip()]
+            snapshot[(item.casefold(), order_id.casefold())] = {
+                "item": item,
+                "order_id": order_id,
+                "names": names,
+            }
+        return str(payload.get("scanned_at", "")) if isinstance(payload, dict) else "", snapshot
+
+    def screen_account_usage(self) -> list[dict]:
+        """Every screen-shared account (service + email) with its seat usage.
+
+        Returns [{item, order_id, used, limit}] - `used` counts distinct
+        customer names holding a screen on that account, the same rule the
+        entry validation and the Excel row-grouping use. Accounts with free
+        seats sort first (most free seats at the top), full accounts last.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT item, order_id, customer FROM sales_entries WHERE TRIM(order_id) <> ''"
+            ).fetchall()
+        accounts: dict[tuple[str, str], dict] = {}
+        for row in rows:
+            item = str(row["item"] or "").strip()
+            limit = screen_service_limit(item)
+            if limit is None:
+                continue
+            order_id = str(row["order_id"] or "").strip()
+            key = (item.casefold(), order_id.casefold())
+            record = accounts.setdefault(
+                key, {"item": item, "order_id": order_id, "limit": limit, "names": set()}
+            )
+            name = str(row["customer"] or "").strip().casefold()
+            if name:
+                record["names"].add(name)
+        # Union in the Scan Excel snapshot, so customers typed straight into
+        # the workbook (while the app wasn't being used) occupy screens too.
+        for key, excel_record in self._excel_screen_snapshot()[1].items():
+            limit = screen_service_limit(excel_record["item"])
+            if limit is None:
+                continue
+            record = accounts.setdefault(
+                key,
+                {
+                    "item": excel_record["item"],
+                    "order_id": excel_record["order_id"],
+                    "limit": limit,
+                    "names": set(),
+                },
+            )
+            for name in excel_record["names"]:
+                record["names"].add(name.casefold())
+        usage = [
+            {
+                "item": record["item"],
+                "order_id": record["order_id"],
+                "limit": int(record["limit"]),
+                "used": len(record["names"]),
+            }
+            for record in accounts.values()
+        ]
+        usage.sort(
+            key=lambda record: (
+                record["used"] >= record["limit"],
+                -(record["limit"] - record["used"]),
+                record["order_id"].casefold(),
+            )
+        )
+        return usage
 
     def screen_account_blocked_message(
         self,

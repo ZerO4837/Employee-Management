@@ -57,6 +57,102 @@ class SalesWorkbook:
     def is_cloud_url(self) -> bool:
         return self.target.lower().startswith(("http://", "https://"))
 
+    def read_screen_accounts(self) -> dict[str, dict]:
+        """Read every screen-service account straight from the workbook.
+
+        Sales recorded directly in Excel (bypassing the app) still occupy
+        screens; this collects, per (service, account email) row, the
+        customer names sitting in the workbook so the app can count them.
+        Returns {"item_key|email_key": {"item", "order_id", "names": [...]}}.
+        Raises when the workbook cannot be opened.
+        """
+        if self._prefer_excel_com():
+            com_result = self._read_screen_accounts_com()
+            if com_result is not None:
+                return com_result
+        workbook = None
+        try:
+            workbook, sheet = self._open_workbook()
+            accounts: dict[str, dict] = {}
+            for row in range(2, max(sheet.max_row, 1) + 1):
+                self._collect_screen_row(
+                    accounts,
+                    sheet.cell(row=row, column=1).value,
+                    sheet.cell(row=row, column=2).value,
+                    sheet.cell(row=row, column=3).value,
+                )
+            return accounts
+        finally:
+            self._close_workbook(workbook)
+
+    def _collect_screen_row(self, accounts: dict[str, dict], customer_value: Any, item_value: Any, order_value: Any) -> None:
+        item = str(item_value or "").strip()
+        if self.SCREEN_SERVICE_LIMITS.get(self._text_key(item)) is None:
+            return
+        order_id = str(order_value or "").strip()
+        if not order_id:
+            return
+        key = f"{self._text_key(item)}|{self._text_key(order_id)}"
+        record = accounts.setdefault(key, {"item": item, "order_id": order_id, "names": []})
+        seen = {self._text_key(name) for name in record["names"]}
+        for name in self._customer_names(customer_value):
+            name_key = self._text_key(name)
+            if name_key and name_key not in seen:
+                record["names"].append(name)
+                seen.add(name_key)
+
+    def _read_screen_accounts_com(self) -> dict[str, dict] | None:
+        if os.name != "nt" or (not self.is_cloud_url and not self.path.exists()):
+            return None
+        try:
+            import pythoncom
+            import win32com.client
+        except ModuleNotFoundError:
+            return None
+        pythoncom.CoInitialize()
+        excel = None
+        workbook = None
+        try:
+            excel = win32com.client.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.EnableEvents = False
+            excel.ScreenUpdating = False
+            workbook = excel.Workbooks.Open(
+                self.target,
+                UpdateLinks=0,
+                ReadOnly=True,
+                Notify=False,
+                AddToMru=False,
+                IgnoreReadOnlyRecommended=True,
+            )
+            sheet = self._select_com_sheet(workbook)
+            max_row, _ = self._com_used_bounds(sheet)
+            accounts: dict[str, dict] = {}
+            for row in range(2, max(max_row, 1) + 1):
+                self._collect_screen_row(
+                    accounts,
+                    sheet.Cells(row, 1).Value,
+                    sheet.Cells(row, 2).Value,
+                    sheet.Cells(row, 3).Value,
+                )
+            return accounts
+        finally:
+            if workbook is not None:
+                try:
+                    workbook.Close(SaveChanges=False)
+                except Exception:
+                    pass
+            if excel is not None:
+                try:
+                    excel.Quit()
+                except Exception:
+                    pass
+            del workbook
+            del excel
+            gc.collect()
+            pythoncom.CoUninitialize()
+
     def sync_entries(self, entries: list[dict[str, Any]], on_result: Any = None) -> list[ExcelSyncResult]:
         """Sync many entries, reusing a single workbook session where possible.
 
@@ -285,16 +381,25 @@ class SalesWorkbook:
         limit = self._screen_limit(entry)
         if limit is None:
             return None
+        customer = str(entry.get("customer") or "").strip()
         previous_customer = str(entry.get("previous_customer") or "").strip()
-        previous_item = entry.get("previous_item") or entry.get("item", "")
-        previous_order_id = entry.get("previous_order_id") or entry.get("order_id", "")
-        row = self._find_screen_row_for_values(sheet, previous_item, previous_order_id)
-        if row is None:
-            row = self._find_screen_row(sheet, entry)
+        if previous_customer:
+            previous_item = str(entry.get("previous_item") or entry.get("item", ""))
+            # Taken AS-IS: an empty previous email means the entry really
+            # was a no-email (out of stock) sale before the edit.
+            previous_order = str(entry.get("previous_order_id") or "")
+            account_changed = (
+                self._text_key(previous_order) != self._text_key(entry.get("order_id", ""))
+                or self._text_key(previous_item) != self._text_key(entry.get("item", ""))
+            )
+            if account_changed:
+                return self._move_screen_entry(
+                    sheet, entry, limit, previous_item, previous_order, previous_customer
+                )
+        row = self._find_screen_row(sheet, entry)
         if row is None:
             return None
 
-        customer = str(entry.get("customer") or "").strip()
         customers = self._customer_names(sheet.cell(row=row, column=1).value)
         if previous_customer:
             replaced = self._replace_customer(customers, previous_customer, customer)
@@ -321,6 +426,106 @@ class SalesWorkbook:
         )
         sheet.cell(row=row, column=6).value = f"=E{row}-D{row}"
         return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
+
+    def _move_screen_entry(
+        self,
+        sheet,
+        entry: dict[str, Any],
+        limit: int,
+        previous_item: str,
+        previous_order: str,
+        previous_customer: str,
+    ) -> ExcelSyncResult | None:
+        """An edited screen entry whose ACCOUNT changed (email or service).
+
+        The customer must leave the old account's row and land on the new
+        one. Without this, resyncing an edited entry left the old name in
+        place and wrote the customer again elsewhere - duplicated data.
+        Returns None when the caller should write a brand-new row.
+        """
+        customer = str(entry.get("customer") or "").strip()
+        target = self._find_screen_row(sheet, entry)
+        target_customers: list[str] = []
+        if target is not None:
+            target_customers = self._customer_names(sheet.cell(row=target, column=1).value)
+            if not self._customer_exists(target_customers, customer) and len(target_customers) >= limit:
+                if self._text_key(entry.get("order_id", "")):
+                    # Checked BEFORE touching the old row, so a blocked
+                    # move leaves the workbook exactly as it was.
+                    return ExcelSyncResult(
+                        False, row=target, message=self._screen_full_message(entry, limit), blocked=True
+                    )
+                target = None  # full no-email row: overflow to a fresh row
+                target_customers = []
+
+        old_row = self._locate_previous_screen_row(sheet, entry, previous_item, previous_order, previous_customer)
+        remaining: list[str] | None = None
+        if old_row is not None:
+            old_customers = self._customer_names(sheet.cell(row=old_row, column=1).value)
+            remaining = [
+                name for name in old_customers
+                if self._text_key(name) != self._text_key(previous_customer)
+            ]
+            if len(remaining) == len(old_customers):
+                remaining = None  # the name was not actually on that row
+
+        if target is None and old_row is not None and remaining is not None and not remaining:
+            # The customer was alone on the old row and the new account has
+            # no row yet: rewrite that same row in place - the entry
+            # literally gets edited where it already lives.
+            self._write_row(sheet, old_row, entry)
+            return ExcelSyncResult(True, row=old_row, message=f"Excel row {old_row}")
+
+        if old_row is not None and remaining is not None:
+            sheet.cell(row=old_row, column=1).value = ", ".join(remaining)
+            selling = self._number_or_text(entry.get("selling_amount", ""))
+            if isinstance(selling, (int, float)):
+                sheet.cell(row=old_row, column=5).value = self._add_numbers(
+                    sheet.cell(row=old_row, column=5).value, -float(selling)
+                )
+            sheet.cell(row=old_row, column=6).value = f"=E{old_row}-D{old_row}"
+
+        if target is None:
+            return None
+        if self._customer_exists(target_customers, customer):
+            return ExcelSyncResult(True, row=target, message=f"Existing Excel row {target}")
+        target_customers.append(customer)
+        sheet.cell(row=target, column=1).value = ", ".join(target_customers)
+        sheet.cell(row=target, column=5).value = self._add_numbers(
+            sheet.cell(row=target, column=5).value, entry.get("selling_amount", "")
+        )
+        sheet.cell(row=target, column=6).value = f"=E{target}-D{target}"
+        return ExcelSyncResult(True, row=target, message=f"Excel row {target}")
+
+    def _locate_previous_screen_row(
+        self,
+        sheet,
+        entry: dict[str, Any],
+        previous_item: str,
+        previous_order: str,
+        previous_customer: str,
+    ) -> int | None:
+        """Find the row the customer previously occupied: the entry's own
+        recorded excel_row first, then a bottom-up scan for a row of the old
+        account that still lists the old customer name."""
+        name_key = self._text_key(previous_customer)
+        rows_to_check: list[int] = []
+        recorded = self._existing_row(entry)
+        if recorded is not None and recorded <= sheet.max_row:
+            rows_to_check.append(recorded)
+        rows_to_check.extend(range(max(sheet.max_row, 1), 1, -1))
+        for row in rows_to_check:
+            if not self._screen_row_matches_values(
+                sheet.cell(row=row, column=2).value,
+                sheet.cell(row=row, column=3).value,
+                previous_item,
+                previous_order,
+            ):
+                continue
+            names = self._customer_names(sheet.cell(row=row, column=1).value)
+            if any(self._text_key(name) == name_key for name in names):
+                return row
+        return None
 
     def _prefer_excel_com(self) -> bool:
         return os.name == "nt" and (
@@ -538,16 +743,23 @@ class SalesWorkbook:
         limit = self._screen_limit(entry)
         if limit is None:
             return None
+        customer = str(entry.get("customer") or "").strip()
         previous_customer = str(entry.get("previous_customer") or "").strip()
-        previous_item = entry.get("previous_item") or entry.get("item", "")
-        previous_order_id = entry.get("previous_order_id") or entry.get("order_id", "")
-        row = self._find_screen_row_com_for_values(sheet, previous_item, previous_order_id)
-        if row is None:
-            row = self._find_screen_row_com(sheet, entry)
+        if previous_customer:
+            previous_item = str(entry.get("previous_item") or entry.get("item", ""))
+            previous_order = str(entry.get("previous_order_id") or "")
+            account_changed = (
+                self._text_key(previous_order) != self._text_key(entry.get("order_id", ""))
+                or self._text_key(previous_item) != self._text_key(entry.get("item", ""))
+            )
+            if account_changed:
+                return self._move_screen_entry_com(
+                    sheet, entry, limit, previous_item, previous_order, previous_customer
+                )
+        row = self._find_screen_row_com(sheet, entry)
         if row is None:
             return None
 
-        customer = str(entry.get("customer") or "").strip()
         customers = self._customer_names(sheet.Cells(row, 1).Value)
         if previous_customer:
             replaced = self._replace_customer(customers, previous_customer, customer)
@@ -569,6 +781,89 @@ class SalesWorkbook:
         sheet.Cells(row, 5).Value = self._add_numbers(sheet.Cells(row, 5).Value, entry.get("selling_amount", ""))
         sheet.Cells(row, 6).Formula = f"=E{row}-D{row}"
         return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
+
+    def _move_screen_entry_com(
+        self,
+        sheet,
+        entry: dict[str, Any],
+        limit: int,
+        previous_item: str,
+        previous_order: str,
+        previous_customer: str,
+    ) -> ExcelSyncResult | None:
+        """COM mirror of _move_screen_entry."""
+        customer = str(entry.get("customer") or "").strip()
+        target = self._find_screen_row_com(sheet, entry)
+        target_customers: list[str] = []
+        if target is not None:
+            target_customers = self._customer_names(sheet.Cells(target, 1).Value)
+            if not self._customer_exists(target_customers, customer) and len(target_customers) >= limit:
+                if self._text_key(entry.get("order_id", "")):
+                    return ExcelSyncResult(
+                        False, row=target, message=self._screen_full_message(entry, limit), blocked=True
+                    )
+                target = None
+                target_customers = []
+
+        old_row = self._locate_previous_screen_row_com(sheet, entry, previous_item, previous_order, previous_customer)
+        remaining: list[str] | None = None
+        if old_row is not None:
+            old_customers = self._customer_names(sheet.Cells(old_row, 1).Value)
+            remaining = [
+                name for name in old_customers
+                if self._text_key(name) != self._text_key(previous_customer)
+            ]
+            if len(remaining) == len(old_customers):
+                remaining = None
+
+        if target is None and old_row is not None and remaining is not None and not remaining:
+            self._write_com_row(sheet, old_row, entry)
+            return ExcelSyncResult(True, row=old_row, message=f"Excel row {old_row}")
+
+        if old_row is not None and remaining is not None:
+            sheet.Cells(old_row, 1).Value = ", ".join(remaining)
+            selling = self._number_or_text(entry.get("selling_amount", ""))
+            if isinstance(selling, (int, float)):
+                sheet.Cells(old_row, 5).Value = self._add_numbers(sheet.Cells(old_row, 5).Value, -float(selling))
+            sheet.Cells(old_row, 6).Formula = f"=E{old_row}-D{old_row}"
+
+        if target is None:
+            return None
+        if self._customer_exists(target_customers, customer):
+            return ExcelSyncResult(True, row=target, message=f"Existing Excel row {target}")
+        target_customers.append(customer)
+        sheet.Cells(target, 1).Value = ", ".join(target_customers)
+        sheet.Cells(target, 5).Value = self._add_numbers(sheet.Cells(target, 5).Value, entry.get("selling_amount", ""))
+        sheet.Cells(target, 6).Formula = f"=E{target}-D{target}"
+        return ExcelSyncResult(True, row=target, message=f"Excel row {target}")
+
+    def _locate_previous_screen_row_com(
+        self,
+        sheet,
+        entry: dict[str, Any],
+        previous_item: str,
+        previous_order: str,
+        previous_customer: str,
+    ) -> int | None:
+        name_key = self._text_key(previous_customer)
+        max_row, _ = self._com_used_bounds(sheet)
+        rows_to_check: list[int] = []
+        recorded = self._existing_row(entry)
+        if recorded is not None and recorded <= max_row:
+            rows_to_check.append(recorded)
+        rows_to_check.extend(range(max(max_row, 1), 1, -1))
+        for row in rows_to_check:
+            if not self._screen_row_matches_values(
+                sheet.Cells(row, 2).Value,
+                sheet.Cells(row, 3).Value,
+                previous_item,
+                previous_order,
+            ):
+                continue
+            names = self._customer_names(sheet.Cells(row, 1).Value)
+            if any(self._text_key(name) == name_key for name in names):
+                return row
+        return None
 
     def _com_row_matches_entry(self, sheet, row: int, entry: dict[str, Any]) -> bool:
         comparisons = (

@@ -273,6 +273,17 @@ class EmployeeApp(tk.Tk):
             )
             if not still_close:
                 return
+        admin_page = self.pages.get("admin")
+        if isinstance(admin_page, AdminPage) and admin_page.has_active_excel_sync():
+            # A half-finished Excel batch leaves entries stuck in a bugged
+            # "Syncing" state, so closing is refused outright until it ends.
+            messagebox.showwarning(
+                "Sync in progress",
+                "The application cannot be closed at the moment - an Excel sync "
+                "is in process.\n\nPlease wait for it to finish, then close the app.",
+                parent=self,
+            )
+            return
         self._finish_close_app()
 
     def _finish_close_app(self) -> None:
