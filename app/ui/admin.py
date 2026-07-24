@@ -508,6 +508,15 @@ class AdminPage(tk.Frame):
         employee_scroll.grid(row=1, column=1, sticky="ns")
         self.employees_tree.configure(yscrollcommand=employee_scroll.set)
 
+        default_row = tk.Frame(listing, bg=WHITE)
+        default_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        default_row.grid_columnconfigure(0, weight=1)
+        self.default_employee_label = tk.Label(default_row, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
+        self.default_employee_label.grid(row=0, column=0, sticky="w")
+        make_button(
+            default_row, "Set Selected as Data Entry Default", self.set_default_entry_employee, "light"
+        ).grid(row=0, column=1, sticky="e")
+
     def _employee_entry(self, parent: tk.Misc, label: str, variable: tk.StringVar, row: int) -> tk.Entry:
         tk.Label(parent, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=row, column=0, sticky="w")
         entry = tk.Entry(
@@ -2081,11 +2090,14 @@ class AdminPage(tk.Frame):
         if self.employee_count_label is not None:
             employee_text = "employee" if len(users) == 1 else "employees"
             self.employee_count_label.configure(text=f"{len(users)} registered {employee_text}")
+        default_username = self._default_entry_employee(users)
         valid_usernames = set()
         for user in users:
             username = user["username"]
             valid_usernames.add(username)
             status = "Active" if user["is_active"] else "Not Active"
+            if username == default_username:
+                status += "  |  Default"
             tag = "employee_active" if user["is_active"] else "employee_frozen"
             self.employees_tree.insert(
                 "",
@@ -2099,8 +2111,49 @@ class AdminPage(tk.Frame):
                     status,
                 ),
             )
+        self._refresh_default_employee_label(users)
         if self.selected_employee_username is not None and self.selected_employee_username not in valid_usernames:
             self.clear_employee_form()
+
+    def _default_entry_employee(self, users: list[dict] | None = None) -> str:
+        """The employee that Add Entry defaults to: the admin's explicit
+        choice when set and still registered, otherwise the first
+        registered employee. Never a hardcoded name."""
+        if users is None:
+            users = self.app.auth.list_users(include_admin=False)
+        usernames = [user["username"] for user in users]
+        try:
+            chosen = self.app.attendance_store.get_setting("admin_default_entry_employee", "")
+        except Exception:
+            chosen = ""
+        if chosen and chosen in usernames:
+            return chosen
+        return usernames[0] if usernames else ""
+
+    def _refresh_default_employee_label(self, users: list[dict] | None = None) -> None:
+        if getattr(self, "default_employee_label", None) is None:
+            return
+        default_username = self._default_entry_employee(users)
+        if default_username:
+            self.default_employee_label.configure(
+                text=f"Add Entry books new sales under: {default_username}"
+            )
+        else:
+            self.default_employee_label.configure(text="Add Entry default: no employees registered yet")
+
+    def set_default_entry_employee(self) -> None:
+        username = self.selected_employee_username
+        if not username:
+            show_app_alert(self, "No employee selected", "Select an employee from the list first.", "warning")
+            return
+        self.app.attendance_store.set_setting("admin_default_entry_employee", username)
+        self._refresh_employees()
+        show_app_alert(
+            self,
+            "Default saved",
+            f"Add Entry in Sales Data will now default to {username}.",
+            "success",
+        )
 
     def _on_employee_selected(self, _event: tk.Event) -> None:
         selection = self.employees_tree.selection()
@@ -3468,16 +3521,13 @@ class AdminAddEntryWindow(tk.Toplevel):
             employee_default = str(entry.get("employee_username", ""))
             date_default = str(entry.get("entry_date", ""))
         else:
-            # Default to the (first) employee: entries only appear on an
-            # employee's panel when booked under their username, and the
-            # "Added by Admin" note already records who entered it. The
-            # admin account stays available in the list for deliberate
+            # Nothing hardcoded: the admin's chosen default (set on the
+            # Registered Employees tab), else the first registered
+            # employee, else the admin account. Entries only appear on an
+            # employee's panel when booked under their username; the admin
+            # account stays available in the list for deliberate
             # admin-only records.
-            employees = self.app.auth.list_users(include_admin=False)
-            if employees:
-                employee_default = employees[0]["username"]
-            else:
-                employee_default = self.app.current_user or ADMIN_USERNAME
+            employee_default = admin_page._default_entry_employee() or (self.app.current_user or ADMIN_USERNAME)
             date_default = datetime.now().strftime("%Y-%m-%d")
         self.employee_var = tk.StringVar(value=employee_default)
         self.date_var = tk.StringVar(value=date_default)
