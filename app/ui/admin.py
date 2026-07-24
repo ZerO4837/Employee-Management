@@ -3468,10 +3468,16 @@ class AdminAddEntryWindow(tk.Toplevel):
             employee_default = str(entry.get("employee_username", ""))
             date_default = str(entry.get("entry_date", ""))
         else:
-            # Data entered by the admin is attributed to the admin account
-            # by default, so it isn't silently booked under whichever
-            # employee happens to sit first in the list.
-            employee_default = self.app.current_user or ADMIN_USERNAME
+            # Default to the (first) employee: entries only appear on an
+            # employee's panel when booked under their username, and the
+            # "Added by Admin" note already records who entered it. The
+            # admin account stays available in the list for deliberate
+            # admin-only records.
+            employees = self.app.auth.list_users(include_admin=False)
+            if employees:
+                employee_default = employees[0]["username"]
+            else:
+                employee_default = self.app.current_user or ADMIN_USERNAME
             date_default = datetime.now().strftime("%Y-%m-%d")
         self.employee_var = tk.StringVar(value=employee_default)
         self.date_var = tk.StringVar(value=date_default)

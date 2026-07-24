@@ -2601,6 +2601,9 @@ class DashboardPage(tk.Frame):
 
         entry["date"] = self._sales_date()
         entry["time"] = now_label()
+        # Mirrors the admin-side markers, so both panels' Note columns
+        # always say who entered the data.
+        entry["notes"] = "Added by Employee"
         saved = self.app.attendance_store.create_sales_entry(self._employee_username(), entry["date"], entry)
         self._mark_excel_sync_pending(self._sales_entry_from_store_row(saved))
         self.last_saved_label.configure(text="Data Added.", fg=SUCCESS)
@@ -2866,6 +2869,9 @@ class EditEntryWindow(tk.Toplevel):
         if full_message:
             messagebox.showerror("Account is full", full_message)
             return
+        # Last touch wins: an employee edit replaces any earlier marker
+        # (including "Edited by Admin") with its own.
+        updates["notes"] = "Edited by Employee"
         original_entry = dict(self.entry)
         updated = self.dashboard.app.attendance_store.update_sales_entry(
             int(self.entry["id"]),
