@@ -88,6 +88,7 @@ class EmployeeApp(tk.Tk):
         self.cloud_sync_running = False
         self.cloud_sync_after_id: str | None = None
         self.login_verification_queue: queue.Queue[CloudSyncResult] = queue.Queue()
+        self._offline_login_pending = False
 
         self._configure_style()
         self._set_window_icon()
@@ -205,6 +206,19 @@ class EmployeeApp(tk.Tk):
         if hasattr(login_page, "set_verifying"):
             login_page.set_verifying(False)
         if not result.ok:
+            # Cloud unreachable - no internet, or Supabase throttling the
+            # project (402 over quota). Refusing the login outright stopped
+            # the shop from working at all, so fall back to the local
+            # credential cache: the PASSWORD is still verified, only the
+            # freshness re-check is skipped. An account the cache already
+            # knows is frozen/deleted is still refused, and
+            # _enforce_current_employee_account_status signs the session out
+            # the moment a real sync succeeds and disagrees.
+            local_user = self.auth.get_user(username)
+            if local_user is not None and local_user.get("is_active", True):
+                self._offline_login_pending = True
+                self._complete_login(username, password)
+                return
             if hasattr(login_page, "show_login_error"):
                 login_page.show_login_error(
                     "Could not verify your account online. Check your internet connection and try again."
@@ -214,6 +228,10 @@ class EmployeeApp(tk.Tk):
         self._complete_login(username, password)
 
     def _complete_login(self, username: str, password: str) -> None:
+        # Read-and-clear: consumed exactly once per attempt, so a failed
+        # attempt can never leave the flag set for the next login.
+        offline_login = getattr(self, "_offline_login_pending", False)
+        self._offline_login_pending = False
         user = self.auth.verify(username, password)
         if user:
             login_page = self.pages.get("login")
@@ -226,6 +244,17 @@ class EmployeeApp(tk.Tk):
             self.current_role = user["role"]
             self._normalize_current_user_notification_reads()
             self.show_page("admin" if self.current_role == "admin" else "dashboard")
+            if offline_login:
+                self.after(
+                    600,
+                    lambda: messagebox.showinfo(
+                        "Signed in offline",
+                        "The cloud could not be reached, so you were signed in using this PC's "
+                        "saved account details.\n\nEverything works normally and your data is saved "
+                        "here. It will sync automatically once the connection is back.",
+                        parent=self,
+                    ),
+                )
             self.after(700, self.start_update_check)
             if self.current_role == "employee":
                 # The employee_users pull above already verified this login
