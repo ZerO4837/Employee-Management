@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 
 from app.config import (
+    APP_VERSION,
     BG,
     BLUE,
     BLUE_DARK,
@@ -315,8 +316,11 @@ class LoginPage(tk.Frame):
         bottom_row = tk.Frame(body, bg=WHITE)
         bottom_row.grid(row=11, column=0, sticky="ew")
         bottom_row.grid_columnconfigure(0, weight=1)
+        tk.Label(bottom_row, text=f"v{APP_VERSION}", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=0, column=0, sticky="w"
+        )
         tk.Label(bottom_row, text="Protected company login", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
-            row=0, column=0, sticky="e"
+            row=0, column=1, sticky="e"
         )
 
         self.password_entry.bind("<Return>", lambda _event: self._submit_login())

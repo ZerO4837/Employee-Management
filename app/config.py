@@ -48,10 +48,14 @@ SUPABASE_URL = os.environ.get("DSP_SUPABASE_URL", "").strip()
 SUPABASE_ANON_KEY = os.environ.get("DSP_SUPABASE_ANON_KEY", "").strip()
 SUPABASE_ADMIN_SECRET = os.environ.get("DSP_SUPABASE_ADMIN_SECRET", "").strip()
 SUPABASE_EMPLOYEE_SYNC_SECRET = os.environ.get("DSP_SUPABASE_EMPLOYEE_SYNC_SECRET", "").strip()
+# 30s (was 15): with delta sync the data itself is tiny, but every cycle
+# still costs fixed per-request overhead that counts toward Supabase's
+# 5 GB/month free egress. 30s keeps that overhead comfortably inside the
+# quota; saves still push to the cloud immediately regardless.
 try:
-    SUPABASE_SYNC_INTERVAL_SECONDS = int(os.environ.get("DSP_SUPABASE_SYNC_INTERVAL_SECONDS", "15"))
+    SUPABASE_SYNC_INTERVAL_SECONDS = int(os.environ.get("DSP_SUPABASE_SYNC_INTERVAL_SECONDS", "30"))
 except ValueError:
-    SUPABASE_SYNC_INTERVAL_SECONDS = 15
+    SUPABASE_SYNC_INTERVAL_SECONDS = 30
 _sales_workbook_setting = os.environ.get("DSP_SALES_WORKBOOK_PATH", "")
 SALES_WORKBOOK_PATH = Path(os.path.expandvars(_sales_workbook_setting)).expanduser()
 SALES_WORKSHEET_NAME = os.environ.get("DSP_SALES_WORKSHEET_NAME", "").strip()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from app.config import (
     SUPABASE_ADMIN_SECRET,
     SUPABASE_EMPLOYEE_SYNC_SECRET,
 )
-from app.utils import to_cloud_timestamp
+from app.utils import is_future_timestamp, to_cloud_timestamp
 
 
 @dataclass
@@ -107,11 +108,93 @@ class SupabaseRestClient:
         return self._request("POST", f"rpc/{function_name}", body=payload)
 
 
+# Rewind applied to every delta watermark, so a row committed slightly out
+# of order around the previous pull is still picked up (imports are
+# idempotent, so the small re-download overlap is free).
+DELTA_OVERLAP_SECONDS = 300
+
+
 class CloudSyncService:
     def __init__(self, store, config_loader, auth_store=None) -> None:
         self.store = store
         self.config_loader = config_loader
         self.auth_store = auth_store
+
+    # ----- Delta sync -----------------------------------------------------
+    # Instead of re-downloading whole tables every cycle (which blew through
+    # the Supabase free egress quota), each pull remembers the newest cloud
+    # updated_at it has seen per stream (a machine-local setting) and asks
+    # only for rows changed after it.
+
+    def _delta_since(self, stream: str) -> str:
+        try:
+            raw = self.store.get_setting(f"delta_watermark_{stream}", "")
+        except Exception:
+            return ""
+        if not raw or is_future_timestamp(raw):
+            # A future-poisoned watermark would filter out everything
+            # forever - fall back to a full pull, which self-corrects it.
+            return ""
+        try:
+            moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        return (moment - timedelta(seconds=DELTA_OVERLAP_SECONDS)).isoformat()
+
+    def _advance_delta(self, stream: str, rows: list) -> None:
+        newest = None
+        newest_raw = ""
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get("updated_at") or "")
+            if not raw:
+                continue
+            try:
+                moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if newest is None or moment > newest:
+                newest = moment
+                newest_raw = raw
+        if not newest_raw:
+            return
+        try:
+            stored = self.store.get_setting(f"delta_watermark_{stream}", "")
+            if stored:
+                stored_moment = datetime.fromisoformat(stored.replace("Z", "+00:00"))
+                if not is_future_timestamp(stored) and stored_moment >= newest:
+                    return
+        except Exception:
+            pass
+        try:
+            self.store.set_setting(f"delta_watermark_{stream}", newest_raw)
+        except Exception:
+            pass
+
+    def _rpc_delta(self, client: SupabaseRestClient, stream: str, delta_name: str, full_name: str, payload: dict) -> list:
+        """Call the _delta RPC with the stream's watermark; if the delta
+        function doesn't exist yet (SQL not applied), quietly fall back to
+        the original full-pull function so nothing breaks."""
+        try:
+            rows = client.rpc(delta_name, dict(payload, since=self._delta_since(stream)))
+        except Exception as exc:
+            message = str(exc).lower()
+            if delta_name.lower() in message or "pgrst202" in message or "404" in message:
+                rows = client.rpc(full_name, payload)
+            else:
+                raise
+        rows = rows if isinstance(rows, list) else []
+        self._advance_delta(stream, rows)
+        return rows
+
+    def _select_delta(self, client: SupabaseRestClient, stream: str, table: str, params: dict[str, str]) -> list:
+        since = self._delta_since(stream)
+        if since:
+            params = dict(params, updated_at=f"gt.{since}")
+        rows = client.select(table, params)
+        self._advance_delta(stream, rows)
+        return rows
 
     def delete_attendance_shift(self, cloud_id: str) -> None:
         if not cloud_id:
@@ -421,9 +504,10 @@ class CloudSyncService:
     def _pull_employee_users(self, client: SupabaseRestClient, sync_secret: str) -> int:
         if self.auth_store is None:
             return 0
-        rows = client.rpc("dsp_list_employee_users", {"sync_secret": sync_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "employee_users", "dsp_list_employee_users_delta", "dsp_list_employee_users",
+            {"sync_secret": sync_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.auth_store.import_cloud_user(row):
@@ -431,9 +515,10 @@ class CloudSyncService:
         return changed
 
     def _pull_attendance_days(self, client: SupabaseRestClient, admin_secret: str) -> int:
-        rows = client.rpc("dsp_list_attendance_days", {"admin_secret": admin_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "attendance_days", "dsp_list_attendance_days_delta", "dsp_list_attendance_days",
+            {"admin_secret": admin_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_attendance_day(row):
@@ -441,9 +526,10 @@ class CloudSyncService:
         return changed
 
     def _pull_attendance_shifts(self, client: SupabaseRestClient, admin_secret: str) -> int:
-        rows = client.rpc("dsp_list_attendance_shifts", {"admin_secret": admin_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "attendance_shifts", "dsp_list_attendance_shifts_delta", "dsp_list_attendance_shifts",
+            {"admin_secret": admin_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_attendance_shift(row):
@@ -451,9 +537,10 @@ class CloudSyncService:
         return changed
 
     def _pull_attendance_day_events(self, client: SupabaseRestClient, admin_secret: str) -> int:
-        rows = client.rpc("dsp_list_attendance_day_events", {"admin_secret": admin_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "attendance_day_events", "dsp_list_attendance_day_events_delta", "dsp_list_attendance_day_events",
+            {"admin_secret": admin_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_attendance_day_event(row):
@@ -461,9 +548,10 @@ class CloudSyncService:
         return changed
 
     def _pull_attendance_events(self, client: SupabaseRestClient, admin_secret: str) -> int:
-        rows = client.rpc("dsp_list_attendance_events", {"admin_secret": admin_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "attendance_events", "dsp_list_attendance_events_delta", "dsp_list_attendance_events",
+            {"admin_secret": admin_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_attendance_event(row):
@@ -471,9 +559,10 @@ class CloudSyncService:
         return changed
 
     def _pull_sales_entries(self, client: SupabaseRestClient, admin_secret: str) -> int:
-        rows = client.rpc("dsp_list_sales_entries", {"admin_secret": admin_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "sales_entries", "dsp_list_sales_entries_delta", "dsp_list_sales_entries",
+            {"admin_secret": admin_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_sales_entry(row):
@@ -487,14 +576,16 @@ class CloudSyncService:
         # dsp_list_sales_entries_shared hasn't been created, employees just
         # keep the old push-only behavior instead of failing every sync.
         try:
-            rows = client.rpc("dsp_list_sales_entries_shared", {"sync_secret": sync_secret})
+            rows = self._rpc_delta(
+                client, "sales_entries_shared",
+                "dsp_list_sales_entries_shared_delta", "dsp_list_sales_entries_shared",
+                {"sync_secret": sync_secret},
+            )
         except Exception as exc:
             message = str(exc).lower()
             if "dsp_list_sales_entries_shared" in message or "pgrst202" in message or "404" in message:
                 return 0
             raise
-        if not isinstance(rows, list):
-            return 0
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_sales_entry(row):
@@ -502,7 +593,9 @@ class CloudSyncService:
         return changed
 
     def _pull_announcements(self, client: SupabaseRestClient) -> int:
-        rows = client.select(
+        rows = self._select_delta(
+            client,
+            "announcements",
             "dsp_announcements",
             {
                 "select": "cloud_id,category,title,message,created_by,created_at,updated_at,is_active",
@@ -517,7 +610,9 @@ class CloudSyncService:
         return changed
 
     def _pull_service_catalog(self, client: SupabaseRestClient) -> int:
-        rows = client.select(
+        rows = self._select_delta(
+            client,
+            "service_catalog",
             "dsp_service_catalog",
             {
                 "select": "cloud_id,service_name,created_by,created_at,updated_at,is_active",
@@ -532,7 +627,9 @@ class CloudSyncService:
         return changed
 
     def _pull_service_templates(self, client: SupabaseRestClient) -> int:
-        rows = client.select(
+        rows = self._select_delta(
+            client,
+            "service_templates",
             "dsp_service_message_templates",
             {
                 "select": "cloud_id,service_name,title,message,created_by,created_at,updated_at,is_active",
@@ -547,9 +644,10 @@ class CloudSyncService:
         return changed
 
     def _pull_inventory_items(self, client: SupabaseRestClient, sync_secret: str) -> int:
-        rows = client.rpc("dsp_list_inventory_items", {"sync_secret": sync_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "inventory_items", "dsp_list_inventory_items_delta", "dsp_list_inventory_items",
+            {"sync_secret": sync_secret},
+        )
         changed = 0
         for row in rows:
             if self.store.import_cloud_inventory_item(row):
@@ -557,9 +655,10 @@ class CloudSyncService:
         return changed
 
     def _pull_app_settings(self, client: SupabaseRestClient, sync_secret: str) -> int:
-        rows = client.rpc("dsp_list_app_settings", {"sync_secret": sync_secret})
-        if not isinstance(rows, list):
-            return 0
+        rows = self._rpc_delta(
+            client, "app_settings", "dsp_list_app_settings_delta", "dsp_list_app_settings",
+            {"sync_secret": sync_secret},
+        )
         changed = 0
         for row in rows:
             if isinstance(row, dict) and self.store.import_cloud_app_setting(row):

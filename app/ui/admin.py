@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from app.cloud_sync import SupabaseConfig
 from app.config import (
     ADMIN_USERNAME,
+    APP_VERSION,
     BG,
     BLUE,
     BLUE_DARK,
@@ -1364,6 +1365,9 @@ class AdminPage(tk.Frame):
         status = status_card.body
         status.grid_columnconfigure(0, weight=1)
         tk.Label(status, text="Cloud Status", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(row=0, column=0, sticky="w")
+        tk.Label(status, text=f"App version v{APP_VERSION}", bg=WHITE, fg=MUTED, font=(FONT, 9)).grid(
+            row=0, column=1, sticky="e"
+        )
         self.cloud_sync_status_label = tk.Label(
             status,
             text="",

@@ -62,7 +62,7 @@ class EmployeeApp(tk.Tk):
     def __init__(self) -> None:
         _enable_windows_dpi_awareness()
         super().__init__()
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME}  -  v{APP_VERSION}")
         self._configure_window_geometry()
         self.configure(bg=BG)
 
@@ -553,7 +553,7 @@ class EmployeeApp(tk.Tk):
             # (close_app) exactly like the user clicking the close button.
             self.title(f"{APP_NAME} - Update launching...")
             return
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME}  -  v{APP_VERSION}")
         messagebox.showwarning("Update could not start", payload or "Unknown error.", parent=self)
 
     def load_sales_workbook_settings(self) -> None:

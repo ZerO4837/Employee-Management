@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import font as tkfont, messagebox, ttk
 
 from app.config import (
+    APP_VERSION,
     BG,
     BLUE,
     BLUE_DARK,
@@ -380,6 +381,7 @@ class DashboardPage(tk.Frame):
         self.sidebar_logout_button = make_button(sidebar, "Logout", self.app.logout, "sidebar_active")
         self.sidebar_logout_button.pack(fill="x")
         add_tooltip(self.sidebar_logout_button, lambda: "Logout" if self.sidebar_collapsed else "")
+        tk.Label(sidebar, text=f"v{APP_VERSION}", bg=SIDEBAR_BG, fg=SIDEBAR_MUTED, font=(FONT, 8)).pack(pady=(8, 0))
 
         shell = tk.Frame(self, bg=BG)
         self.shell = shell
