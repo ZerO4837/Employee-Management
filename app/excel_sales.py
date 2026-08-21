@@ -420,6 +420,15 @@ class SalesWorkbook:
 
         customers.append(customer)
         sheet.cell(row=row, column=1).value = ", ".join(customers)
+        # Buying accumulates just like selling. The account's cost is
+        # recorded on ONE of the customers sharing it (the rest are 0), and
+        # that customer is not necessarily the one that created the Excel
+        # row - so only updating selling here silently dropped the cost
+        # whenever it arrived on a later customer.
+        sheet.cell(row=row, column=4).value = self._add_numbers(
+            sheet.cell(row=row, column=4).value,
+            entry.get("buying_amount", ""),
+        )
         sheet.cell(row=row, column=5).value = self._add_numbers(
             sheet.cell(row=row, column=5).value,
             entry.get("selling_amount", ""),
@@ -483,6 +492,12 @@ class SalesWorkbook:
                 sheet.cell(row=old_row, column=5).value = self._add_numbers(
                     sheet.cell(row=old_row, column=5).value, -float(selling)
                 )
+            # The cost travels with the customer, so it leaves the old row too.
+            buying = self._number_or_text(entry.get("buying_amount", ""))
+            if isinstance(buying, (int, float)) and buying:
+                sheet.cell(row=old_row, column=4).value = self._add_numbers(
+                    sheet.cell(row=old_row, column=4).value, -float(buying)
+                )
             sheet.cell(row=old_row, column=6).value = f"=E{old_row}-D{old_row}"
 
         if target is None:
@@ -491,6 +506,9 @@ class SalesWorkbook:
             return ExcelSyncResult(True, row=target, message=f"Existing Excel row {target}")
         target_customers.append(customer)
         sheet.cell(row=target, column=1).value = ", ".join(target_customers)
+        sheet.cell(row=target, column=4).value = self._add_numbers(
+            sheet.cell(row=target, column=4).value, entry.get("buying_amount", "")
+        )
         sheet.cell(row=target, column=5).value = self._add_numbers(
             sheet.cell(row=target, column=5).value, entry.get("selling_amount", "")
         )
@@ -778,6 +796,8 @@ class SalesWorkbook:
 
         customers.append(customer)
         sheet.Cells(row, 1).Value = ", ".join(customers)
+        # Buying accumulates too - see _sync_screen_entry for why.
+        sheet.Cells(row, 4).Value = self._add_numbers(sheet.Cells(row, 4).Value, entry.get("buying_amount", ""))
         sheet.Cells(row, 5).Value = self._add_numbers(sheet.Cells(row, 5).Value, entry.get("selling_amount", ""))
         sheet.Cells(row, 6).Formula = f"=E{row}-D{row}"
         return ExcelSyncResult(True, row=row, message=f"Excel row {row}")
@@ -825,6 +845,9 @@ class SalesWorkbook:
             selling = self._number_or_text(entry.get("selling_amount", ""))
             if isinstance(selling, (int, float)):
                 sheet.Cells(old_row, 5).Value = self._add_numbers(sheet.Cells(old_row, 5).Value, -float(selling))
+            buying = self._number_or_text(entry.get("buying_amount", ""))
+            if isinstance(buying, (int, float)) and buying:
+                sheet.Cells(old_row, 4).Value = self._add_numbers(sheet.Cells(old_row, 4).Value, -float(buying))
             sheet.Cells(old_row, 6).Formula = f"=E{old_row}-D{old_row}"
 
         if target is None:
@@ -833,6 +856,7 @@ class SalesWorkbook:
             return ExcelSyncResult(True, row=target, message=f"Existing Excel row {target}")
         target_customers.append(customer)
         sheet.Cells(target, 1).Value = ", ".join(target_customers)
+        sheet.Cells(target, 4).Value = self._add_numbers(sheet.Cells(target, 4).Value, entry.get("buying_amount", ""))
         sheet.Cells(target, 5).Value = self._add_numbers(sheet.Cells(target, 5).Value, entry.get("selling_amount", ""))
         sheet.Cells(target, 6).Formula = f"=E{target}-D{target}"
         return ExcelSyncResult(True, row=target, message=f"Excel row {target}")
@@ -1033,7 +1057,14 @@ class SalesWorkbook:
         date_cell.number_format = SALES_EXCEL_DATE_FORMAT
 
     def _number_or_text(self, value: Any) -> int | float | str:
-        text = str(value or "").strip()
+        # NOT "str(value or '')": the number 0 is falsy, so that turned a
+        # cell holding 0 into an empty string. _add_numbers then treated it
+        # as non-numeric and discarded whatever was being added - which is
+        # how a shared account's buying amount vanished whenever the row
+        # already showed 0.
+        if value is None:
+            return ""
+        text = str(value).strip()
         if not text:
             return ""
         normalized = text.replace(",", "")

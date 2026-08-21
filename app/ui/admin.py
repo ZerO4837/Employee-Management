@@ -2916,8 +2916,23 @@ class AdminPage(tk.Frame):
         self.app.attendance_store.delete_blocked_sales_entries()
         self._refresh_sales_period_values()
         start_date, end_date, period_label = self._selected_sales_period_range()
-        entries = self.app.attendance_store.list_sales_entries_between(start_date, end_date)
         search_query = self.sales_search_var.get().strip()
+        search_month_label = ""
+        if search_query:
+            # Searching covers one whole calendar month: the month the
+            # selected period ends in. So the default "Last 5 Days" searches
+            # all of August without ever spilling into July, a single-day
+            # selection searches that day's month, and deliberately picking
+            # "June Sales" searches June.
+            try:
+                anchor = datetime.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError:
+                anchor = date.today()
+            last_day = calendar.monthrange(anchor.year, anchor.month)[1]
+            start_date = anchor.replace(day=1).strftime("%Y-%m-%d")
+            end_date = anchor.replace(day=last_day).strftime("%Y-%m-%d")
+            search_month_label = f"{calendar.month_name[anchor.month]} {anchor.year}"
+        entries = self.app.attendance_store.list_sales_entries_between(start_date, end_date)
         if search_query:
             entries = [entry for entry in entries if sales_entry_matches_search(entry, search_query)]
         self.admin_sales_entries = entries
@@ -2929,9 +2944,10 @@ class AdminPage(tk.Frame):
         self.sales_total_card.value_label.configure(text=money_label(str(total_selling)))
         self.sales_profit_card.value_label.configure(text=money_label(str(total_profit)))
         self.sales_retry_card.value_label.configure(text=str(retry_count))
-        summary = f"{period_label} | {self._sales_window_label(start_date, end_date)} | {len(entries)} entries"
         if search_query:
-            summary += f" | search: {search_query}"
+            summary = f"Search '{search_query}' in {search_month_label} | {len(entries)} entries"
+        else:
+            summary = f"{period_label} | {self._sales_window_label(start_date, end_date)} | {len(entries)} entries"
         self.sales_data_summary_label.configure(text=summary)
 
         for item in self.sales_data_tree.get_children():
@@ -3781,8 +3797,9 @@ class AdminAddEntryWindow(tk.Toplevel):
         full_message = self.app.attendance_store.screen_account_blocked_message(
             entry["item"], entry["order_id"], entry["customer"], exclude_entry_id=exclude_id
         )
-        if full_message:
-            messagebox.showerror("Account is full", full_message, parent=self)
+        if full_message and not messagebox.askyesno(
+            "Account may be full", full_message, icon="warning", default="no", parent=self
+        ):
             return
         # Rides the notes field (already cloud-synced both ways), so the
         # employee's table shows who touched the entry. Deliberately the

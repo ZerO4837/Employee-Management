@@ -96,7 +96,10 @@ class DashboardPage(tk.Frame):
         "sales": "⊕",
         "today": "▤",
     }
-    SALES_VISIBLE_DAYS = 5
+    SALES_VISIBLE_DAYS = 10
+    # Ten day cards side by side would be too narrow to read, so they wrap
+    # onto a second row.
+    SALES_DAY_CARDS_PER_ROW = 5
 
     def __init__(self, parent: tk.Misc, app) -> None:
         super().__init__(parent, bg=BG)
@@ -341,7 +344,7 @@ class DashboardPage(tk.Frame):
             ("messages", "Client Messages"),
             ("inventory", "Inventory"),
             ("sales", "Sold Item Entry"),
-            ("today", "5-Day Data"),
+            ("today", f"{self.SALES_VISIBLE_DAYS}-Day Data"),
         ]
         for index, (key, label) in enumerate(nav_items):
             self.nav_labels[key] = label
@@ -470,7 +473,7 @@ class DashboardPage(tk.Frame):
         )
         self.access_notice = tk.Label(
             body,
-            text="Check in first to unlock sales, break, and 5-day data controls.",
+            text=f"Check in first to unlock sales, break, and {self.SALES_VISIBLE_DAYS}-day data controls.",
             bg=WHITE,
             fg=WARNING,
             font=(FONT_BOLD, 9),
@@ -991,7 +994,7 @@ class DashboardPage(tk.Frame):
         )
         tk.Label(
             form,
-            text="The last 5 days of entries are visible to the employee.",
+            text=f"The last {self.SALES_VISIBLE_DAYS} days of entries are visible to the employee.",
             bg=WHITE,
             fg=MUTED,
             font=(FONT, 10),
@@ -1078,7 +1081,9 @@ class DashboardPage(tk.Frame):
         self.sales_recent_canvas.bind("<MouseWheel>", self._scroll_sales_recent_entries)
         side.grid_rowconfigure(7, weight=1)
 
-        open_today_button = make_button(side, "Open 5-Day Data", lambda: self.show_view("today"), "light")
+        open_today_button = make_button(
+            side, f"Open {self.SALES_VISIBLE_DAYS}-Day Data", lambda: self.show_view("today"), "light"
+        )
         open_today_button.grid(row=8, column=0, sticky="ew", pady=(18, 0))
         self.shift_required_buttons.append(open_today_button)
         return view
@@ -1092,7 +1097,9 @@ class DashboardPage(tk.Frame):
         summary.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         body = summary.body
         body.grid_columnconfigure(0, weight=1)
-        tk.Label(body, text="5-Day Sales Data", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            body, text=f"{self.SALES_VISIBLE_DAYS}-Day Sales Data", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 18)
+        ).grid(row=0, column=0, sticky="w")
         self.today_summary_label = tk.Label(body, text="", bg=WHITE, fg=MUTED, font=(FONT, 10))
         self.today_summary_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
         today_add_button = make_button(body, "Add New Entry", lambda: self.show_view("sales"), "primary")
@@ -1101,8 +1108,9 @@ class DashboardPage(tk.Frame):
 
         days = tk.Frame(view, bg=BG)
         days.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        for column in range(self.SALES_DAY_CARDS_PER_ROW):
+            days.grid_columnconfigure(column, weight=1, uniform="sales_day")
         for index in range(self.SALES_VISIBLE_DAYS):
-            days.grid_columnconfigure(index, weight=1, uniform="sales_day")
             self._build_sales_day_card(days, index)
 
         table_card = SurfaceCard(view, padx=20, pady=18, accent=True, accent_start=TEAL, accent_end=BLUE)
@@ -1164,7 +1172,9 @@ class DashboardPage(tk.Frame):
         }
         widths = {
             "id": 58,
-            "time": 96,
+            # Wide enough for "19 Aug 01:00 PM" - a cross-day search shows
+            # the date next to the time.
+            "time": 132,
             "customer": 170,
             "item": 250,
             "email_order": 250,
@@ -1209,7 +1219,15 @@ class DashboardPage(tk.Frame):
             highlightthickness=1,
             cursor="hand2",
         )
-        card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
+        card_row = index // self.SALES_DAY_CARDS_PER_ROW
+        card_column = index % self.SALES_DAY_CARDS_PER_ROW
+        card.grid(
+            row=card_row,
+            column=card_column,
+            sticky="ew",
+            padx=(0 if card_column == 0 else 8, 0),
+            pady=(0 if card_row == 0 else 8, 0),
+        )
         card.grid_columnconfigure(0, weight=1)
         label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 9), cursor="hand2")
         label.grid(row=0, column=0, sticky="w")
@@ -2041,7 +2059,10 @@ class DashboardPage(tk.Frame):
 
         self._set_sales_inputs_enabled(shift_active)
         if shift_active:
-            self.access_notice.configure(text="Inventory, sales, breaks, and 5-day data controls are unlocked.", fg=SUCCESS)
+            self.access_notice.configure(
+                text=f"Inventory, sales, breaks, and {self.SALES_VISIBLE_DAYS}-day data controls are unlocked.",
+                fg=SUCCESS,
+            )
         elif self.day_active:
             self.access_notice.configure(text="Day is started. Check in to unlock inventory and work controls.", fg=BLUE)
         else:
@@ -2133,7 +2154,10 @@ class DashboardPage(tk.Frame):
             self.sales_today_count.configure(text=self._entry_count_text(len(today_entries)))
             self._refresh_sales_sidebar(today_entries)
             self.today_summary_label.configure(
-                text=f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} visible for 5 days"
+                text=(
+                f"{self._sales_window_label()} | {self._entry_count_text(len(self.sales_entries))} "
+                f"visible for {self.SALES_VISIBLE_DAYS} days"
+            )
             )
             self._refresh_sales_day_cards()
             self._refresh_selected_sales_day_header()
@@ -2255,21 +2279,28 @@ class DashboardPage(tk.Frame):
     def _refresh_today_table(self) -> None:
         for item in self.today_tree.get_children():
             self.today_tree.delete(item)
-        query = self.sales_search_var.get()
-        shown = 0
-        for index, entry in enumerate(self._sales_entries_for_date(self.sales_selected_date)):
-            if not sales_entry_matches_search(entry, query):
-                continue
-            tag = "entry_even" if shown % 2 == 0 else "entry_odd"
-            shown += 1
+        query = self.sales_search_var.get().strip()
+        if query:
+            # Searching spans EVERY day in the 5-day view, not just the
+            # selected card - an account email or phone number is worth
+            # finding whichever day it was sold on. The date is shown
+            # alongside the time so the result is still unambiguous.
+            entries = [entry for entry in self.sales_entries if sales_entry_matches_search(entry, query)]
+        else:
+            entries = self._sales_entries_for_date(self.sales_selected_date)
+        for index, entry in enumerate(entries):
+            tag = "entry_even" if index % 2 == 0 else "entry_odd"
+            time_text = entry["time"]
+            if query:
+                time_text = f"{self._sales_short_date(entry.get('date', ''))} {time_text}"
             self.today_tree.insert(
                 "",
                 "end",
                 iid=str(entry["id"]),
                 tags=(tag,),
                 values=(
-                    str(index + 1),
-                    entry["time"],
+                    str(self._sales_entry_display_number(entry)),
+                    time_text,
                     entry["customer"],
                     entry["item"],
                     entry["order_id"],
@@ -2279,6 +2310,12 @@ class DashboardPage(tk.Frame):
                     str(entry.get("notes", "") or ""),
                 ),
             )
+
+    def _sales_short_date(self, value: str) -> str:
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d").strftime("%d %b")
+        except ValueError:
+            return str(value)
 
     def _mark_excel_sync_pending(self, entry: dict[str, str]) -> dict[str, str]:
         # The employee app never writes to Excel itself - that is entirely
@@ -2594,11 +2631,16 @@ class DashboardPage(tk.Frame):
             return
         entry["status"] = resolved_status
 
+        # A warning with an override, not a hard stop: the count can only
+        # ever be an estimate (renewals, sales entered straight into Excel,
+        # accounts that hold more screens), and the shop must never be
+        # blocked from recording a real sale.
         full_message = self.app.attendance_store.screen_account_blocked_message(
             entry["item"], entry["order_id"], entry["customer"]
         )
-        if full_message:
-            messagebox.showerror("Account is full", full_message)
+        if full_message and not messagebox.askyesno(
+            "Account may be full", full_message, icon="warning", default="no"
+        ):
             return
 
         entry["date"] = self._sales_date()
@@ -2868,8 +2910,9 @@ class EditEntryWindow(tk.Toplevel):
         full_message = self.dashboard.app.attendance_store.screen_account_blocked_message(
             updates["item"], updates["order_id"], updates["customer"], exclude_entry_id=int(self.entry["id"])
         )
-        if full_message:
-            messagebox.showerror("Account is full", full_message)
+        if full_message and not messagebox.askyesno(
+            "Account may be full", full_message, icon="warning", default="no", parent=self
+        ):
             return
         # Last touch wins: an employee edit replaces any earlier marker
         # (including "Edited by Admin") with its own.

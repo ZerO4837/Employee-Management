@@ -3084,6 +3084,13 @@ class AttendanceStore:
             )
         return int(cursor.rowcount)
 
+    # A freshly stocked account gets its screens filled within about two
+    # days; nothing new is added to that email afterwards. So only sales
+    # from the last couple of days say anything about how full an account
+    # is right now. Counting every customer ever recorded on an account
+    # made every reused email eventually read "full" forever.
+    SCREEN_ACCOUNT_ACTIVE_DAYS = 2
+
     def screen_account_customer_count(
         self,
         item: str,
@@ -3111,10 +3118,12 @@ class AttendanceStore:
             return None, 0, False
         item_key = str(item or "").strip().casefold()
         customer_key = str(customer or "").strip().casefold()
+        cutoff = (_now() - timedelta(days=self.SCREEN_ACCOUNT_ACTIVE_DAYS)).strftime("%Y-%m-%d")
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT id, customer FROM sales_entries WHERE LOWER(TRIM(item)) = ? AND LOWER(TRIM(order_id)) = ?",
-                (item_key, order_id_key),
+                "SELECT id, customer FROM sales_entries "
+                "WHERE LOWER(TRIM(item)) = ? AND LOWER(TRIM(order_id)) = ? AND entry_date >= ?",
+                (item_key, order_id_key, cutoff),
             ).fetchall()
         others: set[str] = set()
         already_present = False
@@ -3259,8 +3268,10 @@ class AttendanceStore:
         service = str(item or "This account").strip()
         email = str(order_id or "").strip()
         return (
-            f"{service} account is already full ({limit} customers per account): "
-            f"{email}\n\nPlease use a different account email for this customer."
+            f"{service} account already has {used} customer(s) in the last "
+            f"{self.SCREEN_ACCOUNT_ACTIVE_DAYS} days (limit {limit}):\n{email}\n\n"
+            "Use a different account email if this one is really full.\n\n"
+            "Do you want to save this entry anyway?"
         )
 
     def delete_sales_entry(self, entry_id: int, employee_username: str) -> None:
