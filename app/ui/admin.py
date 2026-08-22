@@ -114,8 +114,6 @@ class AdminPage(tk.Frame):
         self.excel_sheet_var = tk.StringVar()
         self.sales_period_var = tk.StringVar(value="Last 5 Days")
         self.sales_search_var = tk.StringVar()
-        self._excel_scan_running = False
-        self._excel_scan_result: list = []
         self.admin_sales_entries: list[dict] = []
         self.admin_excel_sync_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
         self.admin_excel_sync_pending_entry_ids: set[str] = set()
@@ -213,12 +211,12 @@ class AdminPage(tk.Frame):
         metrics = tk.Frame(parent, bg=BG)
         metrics.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 14))
         metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="admin_dashboard_metrics")
-        self.dashboard_entries_card = MetricCard(metrics, "Total Entries", "0", BLUE, "All saved sales")
+        self.dashboard_entries_card = MetricCard(metrics, "Entries This Month", "0", BLUE, "Sales recorded this month")
         self.dashboard_entries_card.grid(row=0, column=0, sticky="ew", padx=(0, 9))
-        self.dashboard_total_sales_card = MetricCard(metrics, "Total Sales", "0", SUCCESS, "All time selling")
+        self.dashboard_total_sales_card = MetricCard(metrics, "Sales This Month", "0", SUCCESS, "Selling this month")
         self.dashboard_total_sales_card.grid(row=0, column=1, sticky="ew", padx=3)
-        self.dashboard_month_sales_card = MetricCard(metrics, "This Month", "0", TEAL, "Current month selling")
-        self.dashboard_month_sales_card.grid(row=0, column=2, sticky="ew", padx=3)
+        self.dashboard_month_profit_card = MetricCard(metrics, "Profit This Month", "0", TEAL, "Profit this month")
+        self.dashboard_month_profit_card.grid(row=0, column=2, sticky="ew", padx=3)
         self.dashboard_best_day_card = MetricCard(metrics, "Best Sales Day", "0", WARNING, "No sales yet")
         self.dashboard_best_day_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
 
@@ -314,7 +312,7 @@ class AdminPage(tk.Frame):
 
         # --- Bottom row: what is selling + screen account capacity ---
         services_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=TEAL, accent_end=SUCCESS)
-        services_card.grid(row=3, column=0, sticky="nsew", padx=(0, 12), pady=(14, 0))
+        services_card.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
         services = services_card.body
         services.grid_columnconfigure(0, weight=1)
         services.grid_rowconfigure(2, weight=1)
@@ -345,51 +343,6 @@ class AdminPage(tk.Frame):
         services_scroll = ttk.Scrollbar(services, orient="vertical", command=self.dashboard_services_tree.yview)
         services_scroll.grid(row=2, column=1, sticky="ns")
         self.dashboard_services_tree.configure(yscrollcommand=services_scroll.set)
-
-        accounts_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=WARNING, accent_end=BLUE)
-        accounts_card.grid(row=3, column=1, sticky="nsew", pady=(14, 0))
-        accounts = accounts_card.body
-        accounts.grid_columnconfigure(0, weight=1)
-        accounts.grid_rowconfigure(2, weight=1)
-        accounts_header = tk.Frame(accounts, bg=WHITE)
-        accounts_header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        accounts_header.grid_columnconfigure(0, weight=1)
-        tk.Label(accounts_header, text="Screen Accounts", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
-            row=0, column=0, sticky="w"
-        )
-        self.dashboard_scan_excel_button = make_button(
-            accounts_header, "Scan Excel", self.scan_excel_screen_accounts, "light"
-        )
-        self.dashboard_scan_excel_button.grid(row=0, column=1, sticky="e")
-        self.dashboard_accounts_subtitle = tk.Label(
-            accounts,
-            text="Netflix / HBO account emails and how many screens are used",
-            bg=WHITE,
-            fg=MUTED,
-            font=(FONT, 9),
-        )
-        self.dashboard_accounts_subtitle.grid(row=1, column=0, sticky="w", pady=(4, 8))
-        account_columns = ("account", "service", "seats", "state")
-        self.dashboard_accounts_tree = ttk.Treeview(
-            accounts, columns=account_columns, show="headings", height=6, selectmode="none"
-        )
-        account_headings = {"account": "Account Email", "service": "Service", "seats": "Screens", "state": "Status"}
-        account_widths = {"account": 210, "service": 130, "seats": 70, "state": 90}
-        for column in account_columns:
-            self.dashboard_accounts_tree.heading(column, text=account_headings[column], anchor="w")
-            self.dashboard_accounts_tree.column(
-                column,
-                width=account_widths[column],
-                minwidth=account_widths[column],
-                anchor="w",
-                stretch=column == "account",
-            )
-        self.dashboard_accounts_tree.tag_configure("account_free", background="#eafaf4", foreground=TEXT)
-        self.dashboard_accounts_tree.tag_configure("account_full", background="#fff8ea", foreground=TEXT)
-        self.dashboard_accounts_tree.grid(row=2, column=0, sticky="nsew")
-        accounts_scroll = ttk.Scrollbar(accounts, orient="vertical", command=self.dashboard_accounts_tree.yview)
-        accounts_scroll.grid(row=2, column=1, sticky="ns")
-        self.dashboard_accounts_tree.configure(yscrollcommand=accounts_scroll.set)
 
     def _build_employees_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=2)
@@ -1642,10 +1595,15 @@ class AdminPage(tk.Frame):
             text=f"Last cloud sync {self._format_datetime(last_sync)}" if last_sync else "No cloud sync yet"
         )
 
-        self.dashboard_entries_card.value_label.configure(text=str(len(all_entries)))
-        self.dashboard_total_sales_card.value_label.configure(text=self._dashboard_money_label(total_sales))
-        self.dashboard_month_sales_card.value_label.configure(text=self._dashboard_money_label(month_sales))
-        month_helper = f"{calendar.month_name[today.month]} profit {self._dashboard_money_label(month_profit)}"
+        # Cards are scoped to the current month - all-time totals only grow
+        # and say nothing about how the business is doing right now.
+        self.dashboard_entries_card.value_label.configure(text=str(len(month_entries)))
+        self.dashboard_entries_card.helper_label.configure(
+            text=f"{calendar.month_name[today.month]} {today.year} | {len(all_entries)} all time"
+        )
+        self.dashboard_total_sales_card.value_label.configure(text=self._dashboard_money_label(month_sales))
+        self.dashboard_month_profit_card.value_label.configure(text=self._dashboard_money_label(month_profit))
+        month_helper = f"{calendar.month_name[today.month]} selling"
         previous_month_end = month_start - timedelta(days=1)
         previous_start = date(previous_month_end.year, previous_month_end.month, 1)
         previous_sales = sum(
@@ -1657,7 +1615,8 @@ class AdminPage(tk.Frame):
         if previous_sales > 0:
             change = (month_sales - previous_sales) / previous_sales * 100
             month_helper += f" | {change:+.0f}% vs {calendar.month_abbr[previous_month_end.month]}"
-        self.dashboard_month_sales_card.helper_label.configure(text=month_helper)
+        # Trend sits on the Sales card, which is what it measures.
+        self.dashboard_total_sales_card.helper_label.configure(text=month_helper)
         self.dashboard_best_day_card.value_label.configure(text=self._dashboard_money_label(best_day_sales))
         self.dashboard_best_day_card.helper_label.configure(
             text=f"{self._format_date(best_day)} | {best_day_entries} entries" if best_day else "No sales yet"
@@ -1686,7 +1645,6 @@ class AdminPage(tk.Frame):
         )
         self._refresh_dashboard_monthly_table(all_entries, today)
         self._refresh_dashboard_top_services(month_entries, today)
-        self._refresh_dashboard_screen_accounts()
         self._draw_dashboard_sales_graph()
 
     def _refresh_dashboard_top_services(self, month_entries: list[dict], today: date) -> None:
@@ -1723,95 +1681,6 @@ class AdminPage(tk.Frame):
         else:
             subtitle = f"No sales recorded yet for {calendar.month_name[today.month]} {today.year}"
         self.dashboard_services_subtitle.configure(text=subtitle)
-
-    def _refresh_dashboard_screen_accounts(self) -> None:
-        if not hasattr(self, "dashboard_accounts_tree"):
-            return
-        try:
-            usage = self.app.attendance_store.screen_account_usage()
-        except Exception:
-            usage = []
-        for item in self.dashboard_accounts_tree.get_children():
-            self.dashboard_accounts_tree.delete(item)
-        full_count = 0
-        for record in usage:
-            free_seats = int(record["limit"]) - int(record["used"])
-            is_full = free_seats <= 0
-            if is_full:
-                full_count += 1
-            self.dashboard_accounts_tree.insert(
-                "",
-                "end",
-                tags=("account_full" if is_full else "account_free",),
-                values=(
-                    record["order_id"],
-                    record["item"],
-                    f"{record['used']}/{record['limit']}",
-                    "FULL" if is_full else f"{free_seats} free",
-                ),
-            )
-        try:
-            scanned_at = self.app.attendance_store.excel_screen_snapshot_scanned_at()
-        except Exception:
-            scanned_at = ""
-        scan_suffix = f" | Excel scanned {self._format_datetime(scanned_at)}" if scanned_at else ""
-        if usage:
-            available = len(usage) - full_count
-            self.dashboard_accounts_subtitle.configure(
-                text=f"{available} account(s) with free screens, {full_count} full{scan_suffix}"
-            )
-        else:
-            self.dashboard_accounts_subtitle.configure(
-                text=f"Netflix / HBO account emails will appear here once sold{scan_suffix}"
-            )
-
-    def scan_excel_screen_accounts(self) -> None:
-        """Read the workbook itself so sales typed directly into Excel
-        (while the app wasn't used) count toward each account's screens."""
-        if self._excel_scan_running:
-            show_app_alert(self, "Already scanning", "An Excel scan is already in progress.", "info")
-            return
-        self._excel_scan_running = True
-        self._excel_scan_result.clear()
-        set_button_enabled(self.dashboard_scan_excel_button, False)
-        self.dashboard_accounts_subtitle.configure(text="Scanning the Excel workbook...")
-        worker = threading.Thread(target=self._run_excel_scan_worker, daemon=True)
-        worker.start()
-        self.after(300, self._poll_excel_scan)
-
-    def _run_excel_scan_worker(self) -> None:
-        try:
-            accounts = self.app.sales_workbook.read_screen_accounts()
-        except Exception as exc:
-            self._excel_scan_result.append((None, str(exc)))
-            return
-        self._excel_scan_result.append((accounts, ""))
-
-    def _poll_excel_scan(self) -> None:
-        if not self.winfo_exists() or not self._excel_scan_running:
-            return
-        if not self._excel_scan_result:
-            self.after(300, self._poll_excel_scan)
-            return
-        accounts, error = self._excel_scan_result.pop()
-        self._excel_scan_running = False
-        set_button_enabled(self.dashboard_scan_excel_button, True)
-        if error or accounts is None:
-            self._refresh_dashboard_screen_accounts()
-            show_app_alert(self, "Excel scan failed", error or "The workbook could not be read.", "warning")
-            return
-        self.app.attendance_store.save_excel_screen_snapshot(accounts)
-        self._refresh_dashboard_screen_accounts()
-        # Share the snapshot with the employee PC so its account-full
-        # validation also knows about Excel-only customers.
-        self.app.request_cloud_sync(push_local=True)
-        show_app_alert(
-            self,
-            "Excel scan complete",
-            f"Found {len(accounts)} screen account(s) in the workbook. "
-            "Screen usage now includes customers entered directly in Excel.",
-            "success",
-        )
 
     def _sales_entry_date(self, entry: dict) -> date | None:
         try:
