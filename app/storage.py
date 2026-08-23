@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+import calendar
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
@@ -151,6 +152,7 @@ class AttendanceStore:
             "announcements",
             "service_catalog",
             "inventory_items",
+            "inventory_slot_uses",
             "service_message_templates",
             "sales_entries",
             "app_settings",
@@ -344,6 +346,10 @@ class AttendanceStore:
                     account_email TEXT NOT NULL DEFAULT '',
                     account_password TEXT NOT NULL DEFAULT '',
                     comment TEXT NOT NULL DEFAULT '',
+                    item_kind TEXT NOT NULL DEFAULT 'timed',
+                    purchase_date TEXT NOT NULL DEFAULT '',
+                    valid_days INTEGER NOT NULL DEFAULT 30,
+                    total_slots INTEGER NOT NULL DEFAULT 0,
                     created_by TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -353,6 +359,115 @@ class AttendanceStore:
                 )
                 """
             )
+            # A slot service (Canva, Spotify, Adobe...) is one account shared
+            # by several clients. Each row here is one client sitting in one
+            # slot; slots_left is derived from these, never stored, so the
+            # two PCs can never drift apart on the count.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS inventory_slot_uses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    item_cloud_id TEXT NOT NULL DEFAULT '',
+                    item_id INTEGER NOT NULL DEFAULT 0,
+                    client_email TEXT NOT NULL DEFAULT '',
+                    package TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    used_by TEXT NOT NULL DEFAULT '',
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    cloud_synced_at TEXT NOT NULL DEFAULT '',
+                    cloud_sync_error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            # ----- Renewal Services (admin-only) -------------------------
+            # Three levels: a service heading (Canva, Adobe...), the team
+            # accounts bought for it, and the clients sharing each account.
+            # Separate from inventory_items on purpose - inventory is the
+            # employee-facing credential list, this is the admin's renewal
+            # tracker. Cloud columns exist so it can be synced later without
+            # a migration; today it stays on the admin PC.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS renewal_services (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS renewal_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    service_id INTEGER NOT NULL,
+                    account_email TEXT NOT NULL DEFAULT '',
+                    account_password TEXT NOT NULL DEFAULT '',
+                    client_number TEXT NOT NULL DEFAULT '',
+                    sold_date TEXT NOT NULL DEFAULT '',
+                    package TEXT NOT NULL DEFAULT '1 Month',
+                    expiry_date TEXT NOT NULL DEFAULT '',
+                    reminded_at TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (service_id) REFERENCES renewal_services (id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS renewal_clients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id TEXT NOT NULL DEFAULT '',
+                    account_id INTEGER NOT NULL,
+                    package TEXT NOT NULL DEFAULT '1 Month',
+                    client_name TEXT NOT NULL DEFAULT '',
+                    client_number TEXT NOT NULL DEFAULT '',
+                    client_email TEXT NOT NULL DEFAULT '',
+                    purchase_date TEXT NOT NULL DEFAULT '',
+                    expiry_date TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    reminded_at TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (account_id) REFERENCES renewal_accounts (id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_renewal_clients_lookup
+                ON renewal_clients (account_id, is_active, expiry_date)
+                """
+            )
+            # Older builds created these tables without the package/expiry
+            # columns; add them in place rather than losing the rows.
+            client_columns = {row["name"] for row in connection.execute("PRAGMA table_info(renewal_clients)")}
+            if "package" not in client_columns:
+                connection.execute(
+                    "ALTER TABLE renewal_clients ADD COLUMN package TEXT NOT NULL DEFAULT '1 Month'"
+                )
+            account_columns = {row["name"] for row in connection.execute("PRAGMA table_info(renewal_accounts)")}
+            for column, ddl in (
+                ("package", "ALTER TABLE renewal_accounts ADD COLUMN package TEXT NOT NULL DEFAULT '1 Month'"),
+                ("expiry_date", "ALTER TABLE renewal_accounts ADD COLUMN expiry_date TEXT NOT NULL DEFAULT ''"),
+                ("reminded_at", "ALTER TABLE renewal_accounts ADD COLUMN reminded_at TEXT NOT NULL DEFAULT ''"),
+                ("client_number", "ALTER TABLE renewal_accounts ADD COLUMN client_number TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in account_columns:
+                    connection.execute(ddl)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sales_entries (
@@ -512,6 +627,19 @@ class AttendanceStore:
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_inventory_slot_uses_lookup
+                ON inventory_slot_uses (item_cloud_id, is_active, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_slot_uses_cloud_id
+                ON inventory_slot_uses (cloud_id)
+                WHERE cloud_id <> ''
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_sales_entries_lookup
                 ON sales_entries (employee_username, entry_date)
                 """
@@ -597,6 +725,18 @@ class AttendanceStore:
             },
             "inventory_items": {
                 "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
+                # Existing rows become plain timed services with no purchase
+                # date, so nothing suddenly claims to be expiring.
+                "item_kind": "TEXT NOT NULL DEFAULT 'timed'",
+                "purchase_date": "TEXT NOT NULL DEFAULT ''",
+                "valid_days": "INTEGER NOT NULL DEFAULT 30",
+                "total_slots": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "inventory_slot_uses": {
+                "cloud_id": "TEXT NOT NULL DEFAULT ''",
+                "updated_by": "TEXT NOT NULL DEFAULT ''",
                 "cloud_synced_at": "TEXT NOT NULL DEFAULT ''",
                 "cloud_sync_error": "TEXT NOT NULL DEFAULT ''",
             },
@@ -1190,15 +1330,31 @@ class AttendanceStore:
             connection.execute("DELETE FROM attendance_shifts WHERE id = ?", (shift_id,))
         return cloud_id
 
-    def list_shift_summaries(self, limit: int = 250) -> list[dict]:
+    def list_shift_summaries(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 250,
+    ) -> list[dict]:
+        conditions = []
+        params: list[object] = []
+        if start_date:
+            conditions.append("shift_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("shift_date <= ?")
+            params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
         with self.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM attendance_shifts
+                {where}
                 ORDER BY shift_date DESC, shift_number DESC, started_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -2302,6 +2458,23 @@ class AttendanceStore:
                 ),
             )
         return True
+    # ===== Inventory ====================================================
+    # Two kinds of stock, because they are sold differently:
+    #   timed - one account, one client, runs out after so many days
+    #           (Proton VPN and friends). Default 30 days.
+    #   slots - one team account several clients share (Canva, Spotify,
+    #           Adobe). No countdown; what matters is how many slots are
+    #           still free.
+    INVENTORY_KINDS = ("timed", "slots")
+    INVENTORY_DEFAULT_VALID_DAYS = 30
+    # Inside this many days of expiry the countdown turns red.
+    INVENTORY_REMINDER_DAYS = 5
+
+    @classmethod
+    def normalise_inventory_kind(cls, kind: str) -> str:
+        text = str(kind or "").strip().lower()
+        return text if text in cls.INVENTORY_KINDS else "timed"
+
     def create_inventory_item(
         self,
         service_name: str,
@@ -2309,15 +2482,22 @@ class AttendanceStore:
         account_password: str,
         comment: str,
         created_by: str,
+        item_kind: str = "timed",
+        purchase_date: str = "",
+        valid_days: int = INVENTORY_DEFAULT_VALID_DAYS,
+        total_slots: int = 0,
     ) -> dict:
         created_at = _iso()
         cloud_id = uuid.uuid4().hex
+        kind = self.normalise_inventory_kind(item_kind)
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO inventory_items
-                (cloud_id, service_name, account_email, account_password, comment, created_by, created_at, updated_at, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                (cloud_id, service_name, account_email, account_password, comment,
+                 item_kind, purchase_date, valid_days, total_slots,
+                 created_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     cloud_id,
@@ -2325,6 +2505,10 @@ class AttendanceStore:
                     account_email.strip(),
                     account_password.strip(),
                     comment.strip(),
+                    kind,
+                    str(purchase_date or "").strip() if kind == "timed" else "",
+                    max(1, int(valid_days or self.INVENTORY_DEFAULT_VALID_DAYS)),
+                    max(0, int(total_slots or 0)) if kind == "slots" else 0,
                     created_by,
                     created_at,
                     created_at,
@@ -2343,8 +2527,13 @@ class AttendanceStore:
         account_email: str,
         account_password: str,
         comment: str,
+        item_kind: str = "timed",
+        purchase_date: str = "",
+        valid_days: int = INVENTORY_DEFAULT_VALID_DAYS,
+        total_slots: int = 0,
     ) -> dict:
         updated_at = _iso()
+        kind = self.normalise_inventory_kind(item_kind)
         with self.connect() as connection:
             connection.execute(
                 """
@@ -2353,12 +2542,27 @@ class AttendanceStore:
                     account_email = ?,
                     account_password = ?,
                     comment = ?,
+                    item_kind = ?,
+                    purchase_date = ?,
+                    valid_days = ?,
+                    total_slots = ?,
                     updated_at = ?,
                     cloud_synced_at = '',
                     cloud_sync_error = ''
                 WHERE id = ? AND is_active = 1
                 """,
-                (service_name.strip(), account_email.strip(), account_password.strip(), comment.strip(), updated_at, item_id),
+                (
+                    service_name.strip(),
+                    account_email.strip(),
+                    account_password.strip(),
+                    comment.strip(),
+                    kind,
+                    str(purchase_date or "").strip() if kind == "timed" else "",
+                    max(1, int(valid_days or self.INVENTORY_DEFAULT_VALID_DAYS)),
+                    max(0, int(total_slots or 0)) if kind == "slots" else 0,
+                    updated_at,
+                    item_id,
+                ),
             )
             row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         updated = _row_to_dict(row)
@@ -2401,7 +2605,713 @@ class AttendanceStore:
                     """,
                     (limit,),
                 ).fetchall()
+        used = self.inventory_slot_use_counts()
+        return [self._decorate_inventory_item(dict(row), used) for row in rows]
+
+    def inventory_slot_use_counts(self) -> dict[str, int]:
+        """How many slots are taken on each account, keyed by the account's
+        cloud id - that is the id both PCs agree on."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT item_cloud_id, COUNT(*) AS taken
+                FROM inventory_slot_uses
+                WHERE is_active = 1
+                GROUP BY item_cloud_id
+                """
+            ).fetchall()
+        return {str(row["item_cloud_id"]): int(row["taken"]) for row in rows}
+
+    def _decorate_inventory_item(self, row: dict, used: dict[str, int] | None = None) -> dict:
+        """Attach what the screens show but the table does not store: the
+        expiry countdown for timed items and the free-slot count for shared
+        ones. Slots left is always derived, so removing a client's details
+        hands the slot straight back."""
+        record = dict(row)
+        kind = self.normalise_inventory_kind(record.get("item_kind"))
+        record["item_kind"] = kind
+        taken = (used if used is not None else self.inventory_slot_use_counts()).get(
+            str(record.get("cloud_id", "")), 0
+        )
+        if kind == "slots":
+            total = max(0, int(record.get("total_slots") or 0))
+            record["total_slots"] = total
+            record["slots_used"] = taken
+            record["slots_left"] = max(0, total - taken)
+            record["expiry_date"] = ""
+            record["days_left"] = None
+            record["state"] = "full" if record["slots_left"] == 0 and total else "open"
+            return record
+
+        record["slots_used"] = 0
+        record["slots_left"] = 0
+        purchase = str(record.get("purchase_date", "")).strip()
+        days = max(1, int(record.get("valid_days") or self.INVENTORY_DEFAULT_VALID_DAYS))
+        record["valid_days"] = days
+        expiry = ""
+        days_left: int | None = None
+        if purchase:
+            try:
+                expiry_date = datetime.strptime(purchase, "%Y-%m-%d").date() + timedelta(days=days)
+                expiry = expiry_date.strftime("%Y-%m-%d")
+                days_left = (expiry_date - _now().date()).days
+            except ValueError:
+                expiry = ""
+        record["expiry_date"] = expiry
+        record["days_left"] = days_left
+        if days_left is None:
+            record["state"] = "unknown"
+        elif days_left < 0:
+            record["state"] = "expired"
+        elif days_left <= self.INVENTORY_REMINDER_DAYS:
+            record["state"] = "expiring"
+        else:
+            record["state"] = "active"
+        return record
+
+    def get_inventory_item(self, item_id: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM inventory_items WHERE id = ?", (int(item_id),)).fetchone()
+        if row is None:
+            return None
+        return self._decorate_inventory_item(dict(row))
+
+    # ----- slot usage on shared accounts --------------------------------
+    def create_inventory_slot_use(
+        self,
+        item_id: int,
+        client_email: str,
+        package: str = "",
+        notes: str = "",
+        used_by: str = "",
+    ) -> dict:
+        """Seat one client in a free slot. Refuses when the account is full
+        so two people cannot oversell the same account."""
+        item = self.get_inventory_item(int(item_id))
+        if item is None or not item.get("is_active", 1):
+            raise ValueError("That inventory account could not be found.")
+        if item["item_kind"] != "slots":
+            raise ValueError("Only shared accounts have slots to use.")
+        if item["slots_left"] <= 0:
+            raise ValueError(
+                f"{item['service_name']} - {item['account_email']} has no slots left."
+            )
+        email = str(client_email or "").strip()
+        if not email:
+            raise ValueError("Enter the client email for this slot.")
+        now = _iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO inventory_slot_uses
+                (cloud_id, item_cloud_id, item_id, client_email, package, notes,
+                 used_by, updated_by, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    str(item.get("cloud_id", "")),
+                    int(item_id),
+                    email,
+                    str(package or "").strip(),
+                    str(notes or "").strip(),
+                    used_by,
+                    used_by,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM inventory_slot_uses WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("The slot could not be saved.")
+        return created
+
+    def update_inventory_slot_use(
+        self,
+        use_id: int,
+        client_email: str,
+        package: str = "",
+        notes: str = "",
+        updated_by: str = "",
+    ) -> dict:
+        """Clients change their email; whoever spots it can correct it here
+        and the other PC picks the change up on the next sync."""
+        email = str(client_email or "").strip()
+        if not email:
+            raise ValueError("Enter the client email for this slot.")
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_slot_uses
+                SET client_email = ?, package = ?, notes = ?, updated_by = ?, updated_at = ?,
+                    cloud_synced_at = '', cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (email, str(package or "").strip(), str(notes or "").strip(), updated_by, now, int(use_id)),
+            )
+            row = connection.execute("SELECT * FROM inventory_slot_uses WHERE id = ?", (int(use_id),)).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise ValueError("That slot could not be found.")
+        return updated
+
+    def remove_inventory_slot_use(self, use_id: int, removed_by: str = "") -> None:
+        """Soft delete so the removal travels to the other PC - and the slot
+        it was holding comes straight back."""
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE inventory_slot_uses
+                SET is_active = 0, updated_by = ?, updated_at = ?, cloud_synced_at = '', cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (removed_by, now, int(use_id)),
+            )
+
+    def list_inventory_slot_uses(
+        self,
+        item_id: int | None = None,
+        item_cloud_id: str = "",
+        active_only: bool = True,
+    ) -> list[dict]:
+        conditions = []
+        params: list[object] = []
+        if item_cloud_id:
+            conditions.append("item_cloud_id = ?")
+            params.append(str(item_cloud_id))
+        elif item_id is not None:
+            conditions.append("item_id = ?")
+            params.append(int(item_id))
+        if active_only:
+            conditions.append("is_active = 1")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM inventory_slot_uses {where} ORDER BY created_at ASC, id ASC",
+                params,
+            ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_inventory_slot_use(self, use_id: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM inventory_slot_uses WHERE id = ?", (int(use_id),)).fetchone()
+        return _row_to_dict(row)
+
+    # ===== Renewal Services (admin-only): service -> accounts -> clients =
+    # Renewal reminders start this many days before expiry; inside this
+    # window the days-left countdown turns red.
+    CLIENT_REMINDER_DAYS = 5
+    # The packages a client can buy, and how many months each runs for.
+    # Expiry is always calculated from purchase date + package, never typed.
+    RENEWAL_PACKAGES: dict[str, int] = {"1 Month": 1, "6 Months": 6, "1 Year": 12}
+
+    @staticmethod
+    def add_months(start: date, months: int) -> date:
+        """Same day-of-month N months on, clamped to the month's length so
+        31 Jan + 1 month lands on 28/29 Feb rather than overflowing."""
+        month_index = start.month - 1 + months
+        year = start.year + month_index // 12
+        month = month_index % 12 + 1
+        day = min(start.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def package_months(self, package: str) -> int:
+        return self.RENEWAL_PACKAGES.get(str(package or "").strip(), 1)
+
+    def expiry_for_package(self, purchase_date: str, package: str) -> str:
+        """Expiry = purchase date + the package length."""
+        text = str(purchase_date or "").strip()
+        if not text:
+            return ""
+        try:
+            start = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return ""
+        return self.add_months(start, self.package_months(package)).strftime("%Y-%m-%d")
+
+    def create_renewal_service(self, name: str) -> dict:
+        name = name.strip()
+        if not name:
+            raise ValueError("Service name is required.")
+        now = _iso()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM renewal_services WHERE LOWER(TRIM(name)) = ?", (name.casefold(),)
+            ).fetchone()
+            if existing is not None:
+                if not existing["is_active"]:
+                    connection.execute(
+                        "UPDATE renewal_services SET is_active = 1, updated_at = ? WHERE id = ?",
+                        (now, int(existing["id"])),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM renewal_services WHERE id = ?", (int(existing["id"]),)
+                    ).fetchone()
+                return dict(existing)
+            cursor = connection.execute(
+                "INSERT INTO renewal_services (cloud_id, name, created_at, updated_at, is_active) "
+                "VALUES ('', ?, ?, ?, 1)",
+                (name, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM renewal_services WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Service could not be saved.")
+        return created
+
+    def rename_renewal_service(self, service_id: int, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("Service name is required.")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_services SET name = ?, updated_at = ? WHERE id = ?",
+                (name, _iso(), int(service_id)),
+            )
+
+    def remove_renewal_service(self, service_id: int) -> None:
+        """Soft-delete the service and everything under it, so the heading
+        disappears together with its accounts and clients."""
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_services SET is_active = 0, updated_at = ? WHERE id = ?", (now, int(service_id))
+            )
+            connection.execute(
+                "UPDATE renewal_accounts SET is_active = 0, updated_at = ? WHERE service_id = ?",
+                (now, int(service_id)),
+            )
+            connection.execute(
+                """
+                UPDATE renewal_clients SET is_active = 0, updated_at = ?
+                WHERE account_id IN (SELECT id FROM renewal_accounts WHERE service_id = ?)
+                """,
+                (now, int(service_id)),
+            )
+
+    def list_renewal_services(self, active_only: bool = True) -> list[dict]:
+        where = "WHERE is_active = 1" if active_only else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM renewal_services {where} ORDER BY name COLLATE NOCASE ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_renewal_account(
+        self,
+        service_id: int,
+        account_email: str,
+        account_password: str,
+        sold_date: str = "",
+        package: str = "1 Month",
+        client_number: str = "",
+        notes: str = "",
+        created_by: str = "",
+    ) -> dict:
+        now = _iso()
+        # The account itself is sold too, so it carries its own package and
+        # expiry exactly like a client does.
+        expiry_date = self.expiry_for_package(sold_date, package)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO renewal_accounts
+                (cloud_id, service_id, account_email, account_password, client_number, sold_date, package,
+                 expiry_date, notes, created_by, created_at, updated_at, is_active)
+                VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    int(service_id),
+                    account_email.strip(),
+                    account_password.strip(),
+                    client_number.strip(),
+                    sold_date.strip(),
+                    str(package).strip(),
+                    expiry_date,
+                    notes.strip(),
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM renewal_accounts WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Account could not be saved.")
+        return created
+
+    def update_renewal_account(
+        self,
+        account_id: int,
+        account_email: str,
+        account_password: str,
+        sold_date: str = "",
+        package: str = "1 Month",
+        client_number: str = "",
+        notes: str = "",
+    ) -> dict:
+        expiry_date = self.expiry_for_package(sold_date, package)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE renewal_accounts
+                SET account_email = ?, account_password = ?, client_number = ?, sold_date = ?, package = ?,
+                    expiry_date = ?, notes = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    account_email.strip(),
+                    account_password.strip(),
+                    client_number.strip(),
+                    sold_date.strip(),
+                    str(package).strip(),
+                    expiry_date,
+                    notes.strip(),
+                    _iso(),
+                    int(account_id),
+                ),
+            )
+            row = connection.execute("SELECT * FROM renewal_accounts WHERE id = ?", (int(account_id),)).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise ValueError("Account could not be found.")
+        return updated
+
+    def renew_renewal_account(self, account_id: int, package: str = "") -> dict:
+        """Add another package length to the account itself, keeping any
+        time still remaining (see renew_renewal_client)."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM renewal_accounts WHERE id = ?", (int(account_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Account could not be found.")
+            chosen = str(package).strip() or str(row["package"] or "1 Month")
+            today = _now().date()
+            start = today
+            expiry_text = str(row["expiry_date"] or "").strip()
+            if expiry_text:
+                try:
+                    current = datetime.strptime(expiry_text, "%Y-%m-%d").date()
+                    if current > today:
+                        start = current
+                except ValueError:
+                    pass
+            new_expiry = self.add_months(start, self.package_months(chosen)).strftime("%Y-%m-%d")
+            connection.execute(
+                """
+                UPDATE renewal_accounts
+                SET expiry_date = ?, package = ?, reminded_at = '', is_active = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_expiry, chosen, _iso(), int(account_id)),
+            )
+            row = connection.execute("SELECT * FROM renewal_accounts WHERE id = ?", (int(account_id),)).fetchone()
+        renewed = _row_to_dict(row)
+        if renewed is None:
+            raise ValueError("Account could not be found.")
+        return renewed
+
+    def close_renewal_account(self, account_id: int) -> dict:
+        """The client walked away, so the account goes back on the shelf.
+
+        The email and password are what we actually own, so they stay; the
+        sale details - client number, sold date, package, expiry - are wiped
+        so the account reads as in stock and ready to sell again. Clients
+        are never closed this way, only accounts.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE renewal_accounts
+                SET client_number = '', sold_date = '', package = '', expiry_date = '',
+                    reminded_at = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (_iso(), int(account_id)),
+            )
+            row = connection.execute("SELECT * FROM renewal_accounts WHERE id = ?", (int(account_id),)).fetchone()
+        closed = _row_to_dict(row)
+        if closed is None:
+            raise ValueError("Account could not be found.")
+        return closed
+
+    def mark_renewal_account_reminded(self, account_id: int) -> None:
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_accounts SET reminded_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, int(account_id)),
+            )
+
+    def remove_renewal_account(self, account_id: int) -> None:
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_accounts SET is_active = 0, updated_at = ? WHERE id = ?", (now, int(account_id))
+            )
+            connection.execute(
+                "UPDATE renewal_clients SET is_active = 0, updated_at = ? WHERE account_id = ?",
+                (now, int(account_id)),
+            )
+
+    def list_renewal_accounts(self, service_id: int | None = None, active_only: bool = True) -> list[dict]:
+        conditions = []
+        params: list[object] = []
+        if service_id is not None:
+            conditions.append("a.service_id = ?")
+            params.append(int(service_id))
+        if active_only:
+            conditions.append("a.is_active = 1")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.*, s.name AS service_name
+                FROM renewal_accounts a
+                JOIN renewal_services s ON s.id = a.service_id
+                {where}
+                ORDER BY a.account_email COLLATE NOCASE ASC, a.id ASC
+                """,
+                params,
+            ).fetchall()
+        return [self._decorate_expiry(dict(row), is_account=True) for row in rows]
+
+    def create_renewal_client(
+        self,
+        account_id: int,
+        client_number: str,
+        client_email: str,
+        purchase_date: str,
+        package: str,
+        notes: str = "",
+        created_by: str = "",
+    ) -> dict:
+        now = _iso()
+        expiry_date = self.expiry_for_package(purchase_date, package)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO renewal_clients
+                (cloud_id, account_id, package, client_name, client_number, client_email,
+                 purchase_date, expiry_date, notes, created_by, created_at, updated_at, is_active)
+                VALUES ('', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    int(account_id),
+                    str(package).strip(),
+                    client_number.strip(),
+                    client_email.strip(),
+                    purchase_date.strip(),
+                    expiry_date,
+                    notes.strip(),
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM renewal_clients WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        created = _row_to_dict(row)
+        if created is None:
+            raise RuntimeError("Client could not be saved.")
+        return created
+
+    def update_renewal_client(
+        self,
+        client_id: int,
+        client_number: str,
+        client_email: str,
+        purchase_date: str,
+        package: str,
+        notes: str = "",
+    ) -> dict:
+        expiry_date = self.expiry_for_package(purchase_date, package)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE renewal_clients
+                SET client_number = ?, client_email = ?, package = ?,
+                    purchase_date = ?, expiry_date = ?, notes = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    client_number.strip(),
+                    client_email.strip(),
+                    str(package).strip(),
+                    purchase_date.strip(),
+                    expiry_date,
+                    notes.strip(),
+                    _iso(),
+                    int(client_id),
+                ),
+            )
+            row = connection.execute("SELECT * FROM renewal_clients WHERE id = ?", (int(client_id),)).fetchone()
+        updated = _row_to_dict(row)
+        if updated is None:
+            raise ValueError("Client could not be found.")
+        return updated
+
+    def remove_renewal_client(self, client_id: int) -> None:
+        """Client taken off the account (renewal declined, or cleaned up
+        after expiry). Soft delete so the history is not lost."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_clients SET is_active = 0, updated_at = ? WHERE id = ?",
+                (_iso(), int(client_id)),
+            )
+
+    def mark_renewal_client_reminded(self, client_id: int) -> None:
+        now = _iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE renewal_clients SET reminded_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, int(client_id)),
+            )
+
+    def renew_renewal_client(self, client_id: int, package: str = "") -> dict:
+        """Add another package length of time. Time still remaining is kept
+        (extended from the current expiry); an already-expired client
+        restarts from today. Clears the reminder so the countdown is fresh.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM renewal_clients WHERE id = ?", (int(client_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Client could not be found.")
+            chosen = str(package).strip() or str(row["package"] or "1 Month")
+            today = _now().date()
+            start = today
+            expiry_text = str(row["expiry_date"] or "").strip()
+            if expiry_text:
+                try:
+                    current = datetime.strptime(expiry_text, "%Y-%m-%d").date()
+                    if current > today:
+                        start = current
+                except ValueError:
+                    pass
+            new_expiry = self.add_months(start, self.package_months(chosen)).strftime("%Y-%m-%d")
+            connection.execute(
+                """
+                UPDATE renewal_clients
+                SET expiry_date = ?, package = ?, reminded_at = '', is_active = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_expiry, chosen, _iso(), int(client_id)),
+            )
+            row = connection.execute("SELECT * FROM renewal_clients WHERE id = ?", (int(client_id),)).fetchone()
+        renewed = _row_to_dict(row)
+        if renewed is None:
+            raise ValueError("Client could not be found.")
+        return renewed
+
+    def _decorate_expiry(self, row: dict, is_account: bool = False) -> dict:
+        """Attach the countdown the UI needs - days_left plus a state of
+        active / expiring / expired. Used for accounts and clients alike,
+        since both are sold with their own expiry.
+
+        Accounts get one extra state: an account with no sold date is not
+        missing data, it is sitting in stock waiting to be sold.
+        """
+        record = dict(row)
+        expiry = str(record.get("expiry_date", "")).strip()
+        days_left: int | None = None
+        if expiry:
+            try:
+                days_left = (datetime.strptime(expiry, "%Y-%m-%d").date() - _now().date()).days
+            except ValueError:
+                days_left = None
+        record["days_left"] = days_left
+        record["in_stock"] = is_account and not str(record.get("sold_date", "")).strip()
+        if days_left is None:
+            record["state"] = "in_stock" if record["in_stock"] else "unknown"
+        elif days_left < 0:
+            record["state"] = "expired"
+        elif days_left <= self.CLIENT_REMINDER_DAYS:
+            record["state"] = "expiring"
+        else:
+            record["state"] = "active"
+        return record
+
+    def list_renewal_clients(
+        self,
+        account_id: int | None = None,
+        service_id: int | None = None,
+        active_only: bool = True,
+    ) -> list[dict]:
+        conditions = []
+        params: list[object] = []
+        if account_id is not None:
+            conditions.append("c.account_id = ?")
+            params.append(int(account_id))
+        if service_id is not None:
+            conditions.append("a.service_id = ?")
+            params.append(int(service_id))
+        if active_only:
+            conditions.append("c.is_active = 1 AND a.is_active = 1")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.*, a.account_email, a.account_password, a.sold_date, a.service_id,
+                       s.name AS service_name
+                FROM renewal_clients c
+                JOIN renewal_accounts a ON a.id = c.account_id
+                JOIN renewal_services s ON s.id = a.service_id
+                {where}
+                ORDER BY (c.expiry_date = '') ASC, c.expiry_date ASC, c.id ASC
+                """,
+                params,
+            ).fetchall()
+        return [self._decorate_expiry(dict(row)) for row in rows]
+
+    def list_renewal_reminders(self, within_days: int | None = None) -> list[dict]:
+        """Everything needing action - accounts AND the clients on them -
+        expiring inside the reminder window or already expired. Each row
+        carries a "kind" of account/client so the caller can act on the
+        right record. Most urgent first."""
+        window = self.CLIENT_REMINDER_DAYS if within_days is None else within_days
+        reminders: list[dict] = []
+        for account in self.list_renewal_accounts(active_only=True):
+            if account["days_left"] is not None and account["days_left"] <= window:
+                entry = dict(account)
+                entry["kind"] = "account"
+                reminders.append(entry)
+        for client in self.list_renewal_clients(active_only=True):
+            if client["days_left"] is not None and client["days_left"] <= window:
+                entry = dict(client)
+                entry["kind"] = "client"
+                reminders.append(entry)
+        reminders.sort(key=lambda record: record["days_left"])
+        return reminders
+
+    def renewal_counts(self) -> dict[str, int]:
+        clients = self.list_renewal_clients(active_only=True)
+        accounts = self.list_renewal_accounts()
+        needing = [
+            record
+            for record in accounts + clients
+            if record["days_left"] is not None and record["days_left"] <= self.CLIENT_REMINDER_DAYS
+        ]
+        return {
+            "services": len(self.list_renewal_services()),
+            "accounts": len(accounts),
+            "in_stock": sum(1 for a in accounts if a["in_stock"]),
+            "clients": len(clients),
+            "expiring": sum(1 for r in needing if r["state"] == "expiring"),
+            "expired": sum(1 for r in needing if r["state"] == "expired"),
+        }
 
     def list_cloud_pending_inventory_items(self, limit: int = 200) -> list[dict]:
         with self.connect() as connection:
@@ -2482,6 +3392,16 @@ class AttendanceStore:
         if is_future_timestamp(updated_at):
             return False
         is_active = 1 if bool(item.get("is_active", True)) else 0
+        kind = self.normalise_inventory_kind(item.get("item_kind"))
+        purchase_date = str(item.get("purchase_date", "") or "").strip() if kind == "timed" else ""
+        try:
+            valid_days = max(1, int(item.get("valid_days") or self.INVENTORY_DEFAULT_VALID_DAYS))
+        except (TypeError, ValueError):
+            valid_days = self.INVENTORY_DEFAULT_VALID_DAYS
+        try:
+            total_slots = max(0, int(item.get("total_slots") or 0)) if kind == "slots" else 0
+        except (TypeError, ValueError):
+            total_slots = 0
         with self.connect() as connection:
             existing = connection.execute(
                 "SELECT * FROM inventory_items WHERE cloud_id = ?",
@@ -2498,6 +3418,10 @@ class AttendanceStore:
                         account_email = ?,
                         account_password = ?,
                         comment = ?,
+                        item_kind = ?,
+                        purchase_date = ?,
+                        valid_days = ?,
+                        total_slots = ?,
                         created_by = ?,
                         created_at = ?,
                         updated_at = ?,
@@ -2511,6 +3435,10 @@ class AttendanceStore:
                         str(item.get("account_email", "")),
                         str(item.get("account_password", "")),
                         str(item.get("comment", "")),
+                        kind,
+                        purchase_date,
+                        valid_days,
+                        total_slots,
                         str(item.get("created_by", "")),
                         created_at,
                         updated_at,
@@ -2523,8 +3451,10 @@ class AttendanceStore:
             connection.execute(
                 """
                 INSERT INTO inventory_items
-                (cloud_id, service_name, account_email, account_password, comment, created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                (cloud_id, service_name, account_email, account_password, comment,
+                 item_kind, purchase_date, valid_days, total_slots,
+                 created_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
                 """,
                 (
                     cloud_id,
@@ -2532,12 +3462,127 @@ class AttendanceStore:
                     str(item.get("account_email", "")),
                     str(item.get("account_password", "")),
                     str(item.get("comment", "")),
+                    kind,
+                    purchase_date,
+                    valid_days,
+                    total_slots,
                     str(item.get("created_by", "")),
                     created_at,
                     updated_at,
                     is_active,
                     _iso(),
                 ),
+            )
+        return True
+
+    def list_cloud_pending_inventory_slot_uses(self, limit: int = 200) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM inventory_slot_uses
+                WHERE cloud_id = ''
+                    OR cloud_synced_at = ''
+                    OR cloud_synced_at < updated_at
+                    OR cloud_sync_error <> ''
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ensure_inventory_slot_use_cloud_id(self, use_id: int) -> dict:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM inventory_slot_uses WHERE id = ?", (int(use_id),)).fetchone()
+            if row is None:
+                raise ValueError("Slot could not be found.")
+            if row["cloud_id"]:
+                return dict(row)
+            connection.execute(
+                """
+                UPDATE inventory_slot_uses
+                SET cloud_id = ?, updated_at = ?, cloud_synced_at = '', cloud_sync_error = ''
+                WHERE id = ?
+                """,
+                (uuid.uuid4().hex, row["updated_at"] or row["created_at"] or _iso(), int(use_id)),
+            )
+            row = connection.execute("SELECT * FROM inventory_slot_uses WHERE id = ?", (int(use_id),)).fetchone()
+        use = _row_to_dict(row)
+        if use is None:
+            raise ValueError("Slot could not be found.")
+        return use
+
+    def mark_inventory_slot_use_cloud_sync(self, use_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE inventory_slot_uses SET cloud_synced_at = ?, cloud_sync_error = '' WHERE id = ?",
+                (_iso(), int(use_id)),
+            )
+
+    def mark_inventory_slot_use_cloud_error(self, use_id: int, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE inventory_slot_uses SET cloud_sync_error = ? WHERE id = ?",
+                (error[:500], int(use_id)),
+            )
+
+    def import_cloud_inventory_slot_use(self, use: dict) -> bool:
+        """Slots are linked by the account's cloud id, not its local row id -
+        the two PCs number their rows differently."""
+        use = _normalize_cloud_timestamps(use)
+        cloud_id = str(use.get("cloud_id", "")).strip()
+        item_cloud_id = str(use.get("item_cloud_id", "")).strip()
+        if not cloud_id or not item_cloud_id:
+            return False
+        created_at = str(use.get("created_at") or use.get("updated_at") or _iso())
+        updated_at = str(use.get("updated_at") or created_at)
+        if is_future_timestamp(updated_at):
+            return False
+        is_active = 1 if bool(use.get("is_active", True)) else 0
+        with self.connect() as connection:
+            local_item = connection.execute(
+                "SELECT id FROM inventory_items WHERE cloud_id = ?", (item_cloud_id,)
+            ).fetchone()
+            item_id = int(local_item["id"]) if local_item is not None else 0
+            existing = connection.execute(
+                "SELECT * FROM inventory_slot_uses WHERE cloud_id = ?", (cloud_id,)
+            ).fetchone()
+            values = (
+                item_cloud_id,
+                item_id,
+                str(use.get("client_email", "")),
+                str(use.get("package", "")),
+                str(use.get("notes", "")),
+                str(use.get("used_by", "")),
+                str(use.get("updated_by", "")),
+                created_at,
+                updated_at,
+                is_active,
+                _iso(),
+            )
+            if existing is not None:
+                local_updated = str(existing["updated_at"] or existing["created_at"] or "")
+                if is_timestamp_newer_or_equal(local_updated, updated_at) and not existing["cloud_sync_error"]:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE inventory_slot_uses
+                    SET item_cloud_id = ?, item_id = ?, client_email = ?, package = ?, notes = ?,
+                        used_by = ?, updated_by = ?, created_at = ?, updated_at = ?, is_active = ?,
+                        cloud_synced_at = ?, cloud_sync_error = ''
+                    WHERE cloud_id = ?
+                    """,
+                    values + (cloud_id,),
+                )
+                return True
+            connection.execute(
+                """
+                INSERT INTO inventory_slot_uses
+                (cloud_id, item_cloud_id, item_id, client_email, package, notes,
+                 used_by, updated_by, created_at, updated_at, is_active, cloud_synced_at, cloud_sync_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (cloud_id,) + values,
             )
         return True
     def list_cloud_pending_service_message_templates(self, limit: int = 150) -> list[dict]:

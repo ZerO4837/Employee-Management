@@ -432,7 +432,7 @@ class EmployeeApp(tk.Tk):
                     page.notification_dropdown.refresh()
             elif isinstance(page, AdminPage):
                 page._refresh_dashboard()
-                shifts = self.attendance_store.list_shift_summaries()
+                shifts = page._current_month_shifts()
                 page._refresh_metrics(shifts)
                 page._refresh_shift_table(shifts)
                 page._refresh_event_table(page.selected_shift_id)

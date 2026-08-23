@@ -32,11 +32,16 @@ from app.config import (
     WHITE,
 )
 from app.excel_sales import ExcelSyncResult
-from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE, EXCEL_SYNC_PENDING_MESSAGE
+from app.storage import EXCEL_RESYNC_AFTER_EDIT_MESSAGE, EXCEL_SYNC_PENDING_MESSAGE, AttendanceStore
 from app.ui.dashboard import _amount_input_allowed, _amount_value_valid
 from app.ui.widgets import (
+    DatePicker,
     MetricCard,
     SurfaceCard,
+    add_tooltip,
+    ask_app_choice,
+    ask_app_text,
+    ask_slot_details,
     combo_box,
     field_label,
     fill_with_scrollable_region,
@@ -47,7 +52,29 @@ from app.ui.widgets import (
     status_pill,
     text_entry,
 )
-from app.utils import duration_label, money_label, now_label, parse_local_datetime, sales_entry_matches_search, today_label
+from app.utils import (
+    duration_label,
+    inventory_status_text,
+    money_label,
+    now_label,
+    parse_local_datetime,
+    sales_entry_matches_search,
+    today_label,
+)
+
+# Inventory comes in two shapes and they are sold differently, so the form
+# and the list both change with the choice.
+INVENTORY_KIND_LABELS = {
+    "timed": "Timed service (counts down)",
+    "slots": "Shared account (slots)",
+}
+INVENTORY_KIND_HINTS = {
+    "timed": "One account for one client - Proton VPN and the like. It counts down from the "
+             "purchase date and turns red in the last 5 days.",
+    "slots": "One team account several clients share - Canva, Spotify, Adobe. No countdown; "
+             "what matters is how many slots are still free.",
+}
+INVENTORY_LABEL_TO_KIND = {label: kind for kind, label in INVENTORY_KIND_LABELS.items()}
 
 
 class AdminPage(tk.Frame):
@@ -103,6 +130,52 @@ class AdminPage(tk.Frame):
         self.inventory_comment_text: tk.Text | None = None
         self.inventory_tree: ttk.Treeview | None = None
         self.inventory_preview_text: tk.Text | None = None
+        self.inventory_kind_label_var = tk.StringVar(value=INVENTORY_KIND_LABELS["timed"])
+        self.inventory_valid_days_var = tk.StringVar(value="30")
+        self.inventory_slots_var = tk.StringVar(value="5")
+        self.inventory_kind_combo: ttk.Combobox | None = None
+        self.inventory_kind_hint_label: tk.Label | None = None
+        self.inventory_timed_frame: tk.Frame | None = None
+        self.inventory_slots_frame: tk.Frame | None = None
+        self.inventory_purchase_picker: DatePicker | None = None
+        self.inventory_expiry_preview: tk.Label | None = None
+        self.inventory_slot_tree: ttk.Treeview | None = None
+        self.inventory_slot_title_label: tk.Label | None = None
+        self.inventory_slot_uses: list[dict] = []
+        self.selected_inventory_slot_id: int | None = None
+        # ----- Renewal Services (admin only) -----
+        self.selected_renewal_service_id: int | None = None
+        self.selected_renewal_account_id: int | None = None
+        self.selected_renewal_client_id: int | None = None
+        self.renewal_services: list[dict] = []
+        self.renewal_accounts: list[dict] = []
+        self.renewal_clients: list[dict] = []
+        self.renewal_service_buttons: dict[int, tk.Button] = {}
+        self.renewal_service_bar: tk.Frame | None = None
+        self.renewal_accounts_tree: ttk.Treeview | None = None
+        self.renewal_clients_tree: ttk.Treeview | None = None
+        self.renewal_reminders_tree: ttk.Treeview | None = None
+        self.renewal_title_label: tk.Label | None = None
+        self.renewal_subtitle_label: tk.Label | None = None
+        self.renewal_clients_title_label: tk.Label | None = None
+        self.renewal_reminders_subtitle: tk.Label | None = None
+        self.renewal_account_save_button: tk.Button | None = None
+        self.renewal_client_save_button: tk.Button | None = None
+        self.renewal_email_var = tk.StringVar()
+        self.renewal_password_var = tk.StringVar()
+        self.renewal_package_var = tk.StringVar(value="1 Month")
+        self.renewal_number_var = tk.StringVar()
+        self.renewal_sold_picker: DatePicker | None = None
+        self.renewal_account_expiry_preview: tk.Label | None = None
+        self.client_number_var = tk.StringVar()
+        self.client_email_var = tk.StringVar()
+        self.client_package_var = tk.StringVar(value="1 Month")
+        self.client_purchase_picker: DatePicker | None = None
+        self.client_expiry_preview: tk.Label | None = None
+        self.renewal_services_card: MetricCard | None = None
+        self.renewal_accounts_card: MetricCard | None = None
+        self.renewal_clients_card: MetricCard | None = None
+        self.renewal_expiring_card: MetricCard | None = None
         self.inventory_service_combo: ttk.Combobox | None = None
         self.supabase_enabled_var = tk.BooleanVar(value=False)
         self.supabase_url_var = tk.StringVar()
@@ -146,6 +219,7 @@ class AdminPage(tk.Frame):
         announcements_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         messages_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         inventory_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
+        renewals_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         service_catalog_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         cloud_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
         sales_data_tab = tk.Frame(self.notebook, bg=BG, padx=0, pady=0)
@@ -157,6 +231,7 @@ class AdminPage(tk.Frame):
         self.notebook.add(announcements_tab, text="Announcements")
         self.notebook.add(messages_tab, text="Service Messages")
         self.notebook.add(inventory_tab, text="Inventory")
+        self.notebook.add(renewals_tab, text="Renewal Services")
         self.notebook.add(service_catalog_tab, text="Items Sold List")
         self.notebook.add(cloud_tab, text="Cloud Sync")
         self.notebook.add(sales_data_tab, text="Sales Data")
@@ -169,6 +244,7 @@ class AdminPage(tk.Frame):
         self._build_announcements_tab(fill_with_scrollable_region(announcements_tab, bg=BG))
         self._build_message_templates_tab(fill_with_scrollable_region(messages_tab, bg=BG))
         self._build_inventory_tab(fill_with_scrollable_region(inventory_tab, bg=BG))
+        self._build_renewals_tab(fill_with_scrollable_region(renewals_tab, bg=BG))
         self._build_service_catalog_tab(fill_with_scrollable_region(service_catalog_tab, bg=BG))
         self._build_cloud_sync_tab(fill_with_scrollable_region(cloud_tab, bg=BG))
         self._build_sales_data_tab(fill_with_scrollable_region(sales_data_tab, bg=BG))
@@ -599,13 +675,13 @@ class AdminPage(tk.Frame):
         metrics = tk.Frame(parent, bg=BG)
         metrics.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="admin_metrics")
-        self.total_shifts_card = MetricCard(metrics, "Total Shifts", "0", BLUE, "All saved shifts")
+        self.total_shifts_card = MetricCard(metrics, "Shifts This Month", "0", BLUE, "Shifts this month")
         self.total_shifts_card.grid(row=0, column=0, sticky="ew", padx=(0, 9))
         self.active_shift_card = MetricCard(metrics, "Active Shifts", "0", SUCCESS, "Currently checked in")
         self.active_shift_card.grid(row=0, column=1, sticky="ew", padx=3)
-        self.breaks_card = MetricCard(metrics, "Breaks Logged", "0", WARNING, "Across visible shifts")
+        self.breaks_card = MetricCard(metrics, "Breaks Logged", "0", WARNING, "Breaks this month")
         self.breaks_card.grid(row=0, column=2, sticky="ew", padx=3)
-        self.break_time_card = MetricCard(metrics, "Break Time", "0m", TEAL, "Recorded break duration")
+        self.break_time_card = MetricCard(metrics, "Break Time", "0m", TEAL, "Break duration this month")
         self.break_time_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
 
         tables = tk.Frame(parent, bg=BG)
@@ -1033,7 +1109,23 @@ class AdminPage(tk.Frame):
         )
         self.inventory_service_combo.grid(row=3, column=0, sticky="ew", ipady=6, pady=(8, 14))
 
-        tk.Label(form, text="Email / Account", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=4, column=0, sticky="w")
+        # Which kind of stock this is decides the rest of the form.
+        tk.Label(form, text="Service Type", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=4, column=0, sticky="w")
+        self.inventory_kind_combo = ttk.Combobox(
+            form,
+            values=list(INVENTORY_KIND_LABELS.values()),
+            textvariable=self.inventory_kind_label_var,
+            state="readonly",
+            font=(FONT, 10),
+        )
+        self.inventory_kind_combo.grid(row=5, column=0, sticky="ew", ipady=6, pady=(8, 4))
+        self.inventory_kind_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_inventory_kind())
+        self.inventory_kind_hint_label = tk.Label(
+            form, text="", bg=WHITE, fg=MUTED, font=(FONT, 9), wraplength=430, justify="left"
+        )
+        self.inventory_kind_hint_label.grid(row=6, column=0, sticky="w", pady=(0, 14))
+
+        tk.Label(form, text="Email / Account", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=7, column=0, sticky="w")
         tk.Entry(
             form,
             textvariable=self.inventory_email_var,
@@ -1044,9 +1136,9 @@ class AdminPage(tk.Frame):
             highlightbackground=LINE,
             highlightcolor=BLUE,
             font=(FONT, 11),
-        ).grid(row=5, column=0, sticky="ew", ipady=8, pady=(8, 14))
+        ).grid(row=8, column=0, sticky="ew", ipady=8, pady=(8, 14))
 
-        tk.Label(form, text="Password", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=6, column=0, sticky="w")
+        tk.Label(form, text="Password", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=9, column=0, sticky="w")
         tk.Entry(
             form,
             textvariable=self.inventory_password_var,
@@ -1057,12 +1149,85 @@ class AdminPage(tk.Frame):
             highlightbackground=LINE,
             highlightcolor=BLUE,
             font=(FONT, 11),
-        ).grid(row=7, column=0, sticky="ew", ipady=8, pady=(8, 14))
+        ).grid(row=10, column=0, sticky="ew", ipady=8, pady=(8, 14))
 
-        tk.Label(form, text="Comment", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=8, column=0, sticky="w")
+        # --- timed only: purchase date + how long it runs ---
+        self.inventory_timed_frame = tk.Frame(form, bg=WHITE)
+        self.inventory_timed_frame.grid(row=11, column=0, sticky="ew")
+        self.inventory_timed_frame.grid_columnconfigure(0, weight=3)
+        self.inventory_timed_frame.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            self.inventory_timed_frame, text="Date of Purchase", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            self.inventory_timed_frame, text="Valid Days", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.inventory_purchase_picker = DatePicker(self.inventory_timed_frame)
+        self.inventory_purchase_picker.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+        for combo in (
+            self.inventory_purchase_picker.day_combo,
+            self.inventory_purchase_picker.month_combo,
+            self.inventory_purchase_picker.year_combo,
+        ):
+            combo.bind("<<ComboboxSelected>>", lambda _event: self._update_inventory_expiry_preview(), add="+")
+        valid_days_entry = tk.Entry(
+            self.inventory_timed_frame,
+            textvariable=self.inventory_valid_days_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+            justify="center",
+        )
+        valid_days_entry.grid(row=1, column=1, sticky="ew", ipady=5, padx=(10, 0), pady=(8, 6))
+        self.inventory_valid_days_var.trace_add("write", lambda *_: self._update_inventory_expiry_preview())
+        self.inventory_expiry_preview = tk.Label(
+            self.inventory_timed_frame,
+            text="",
+            bg="#eafaf4",
+            fg=SUCCESS,
+            font=(FONT_BOLD, 10),
+            padx=12,
+            pady=8,
+            anchor="w",
+        )
+        self.inventory_expiry_preview.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+
+        # --- slots only: how many clients fit on this account ---
+        self.inventory_slots_frame = tk.Frame(form, bg=WHITE)
+        self.inventory_slots_frame.grid(row=12, column=0, sticky="ew")
+        self.inventory_slots_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            self.inventory_slots_frame, text="Total Slots", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)
+        ).grid(row=0, column=0, sticky="w")
+        tk.Entry(
+            self.inventory_slots_frame,
+            textvariable=self.inventory_slots_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        ).grid(row=1, column=0, sticky="ew", ipady=8, pady=(8, 6))
+        tk.Label(
+            self.inventory_slots_frame,
+            text="How many clients this one account holds. Slots left counts itself down as clients are added.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+            wraplength=430,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(0, 14))
+
+        tk.Label(form, text="Comment", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(row=13, column=0, sticky="w")
         self.inventory_comment_text = tk.Text(
             form,
-            height=8,
+            height=6,
             bg="#f8fbff",
             fg=TEXT,
             relief="flat",
@@ -1073,11 +1238,11 @@ class AdminPage(tk.Frame):
             wrap="word",
             undo=True,
         )
-        self.inventory_comment_text.grid(row=9, column=0, sticky="nsew", pady=(8, 16))
-        form.grid_rowconfigure(9, weight=1)
+        self.inventory_comment_text.grid(row=14, column=0, sticky="nsew", pady=(8, 16))
+        form.grid_rowconfigure(14, weight=1)
 
         actions = tk.Frame(form, bg=WHITE)
-        actions.grid(row=10, column=0, sticky="ew")
+        actions.grid(row=15, column=0, sticky="ew")
         actions.grid_columnconfigure((0, 1), weight=1)
         self.inventory_save_button = make_button(actions, "Save Inventory", self.save_inventory_item, "primary")
         self.inventory_save_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -1090,32 +1255,61 @@ class AdminPage(tk.Frame):
         body = list_card.body
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(1, weight=3)
-        body.grid_rowconfigure(3, weight=2)
+        body.grid_rowconfigure(5, weight=2)
         tk.Label(body, text="Active Inventory", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
             row=0, column=0, sticky="w", pady=(0, 12)
         )
 
-        self.inventory_tree = ttk.Treeview(body, columns=("service", "email", "updated"), show="headings", selectmode="browse")
-        self.inventory_tree.heading("service", text="Service", anchor="w")
-        self.inventory_tree.heading("email", text="Email / Account", anchor="w")
-        self.inventory_tree.heading("updated", text="Updated", anchor="w")
-        self.inventory_tree.column("service", width=230, minwidth=190, anchor="w", stretch=True)
-        self.inventory_tree.column("email", width=340, minwidth=240, anchor="w", stretch=True)
-        self.inventory_tree.column("updated", width=150, minwidth=135, anchor="w", stretch=False)
+        inventory_columns = ("service", "email", "type", "status", "updated")
+        self.inventory_tree = ttk.Treeview(body, columns=inventory_columns, show="headings", selectmode="browse")
+        inventory_headings = {
+            "service": "Service",
+            "email": "Email / Account",
+            "type": "Type",
+            "status": "Slots / Time Left",
+            "updated": "Updated",
+        }
+        inventory_widths = {"service": 165, "email": 215, "type": 85, "status": 145, "updated": 110}
+        for column in inventory_columns:
+            self.inventory_tree.heading(column, text=inventory_headings[column], anchor="w")
+            self.inventory_tree.column(
+                column,
+                width=inventory_widths[column],
+                minwidth=inventory_widths[column],
+                anchor="w",
+                stretch=column in {"service", "email"},
+            )
         self.inventory_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
         self.inventory_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        # The countdown colour is the whole point of a timed service.
+        self.inventory_tree.tag_configure("inventory_active", foreground=SUCCESS)
+        self.inventory_tree.tag_configure("inventory_expiring", foreground=DANGER, background="#fff4f5")
+        self.inventory_tree.tag_configure("inventory_expired", foreground=WHITE, background=DANGER)
+        self.inventory_tree.tag_configure("inventory_open", foreground=BLUE)
+        self.inventory_tree.tag_configure("inventory_full", foreground=DANGER, background="#fff4f5")
+        self.inventory_tree.tag_configure("inventory_unknown", foreground=MUTED)
         self.inventory_tree.grid(row=1, column=0, sticky="nsew")
         self.inventory_tree.bind("<<TreeviewSelect>>", self._on_inventory_selected)
         inventory_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_tree.yview)
         inventory_scroll.grid(row=1, column=1, sticky="ns")
         self.inventory_tree.configure(yscrollcommand=inventory_scroll.set)
 
+        list_actions = tk.Frame(body, bg=WHITE)
+        list_actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        list_actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(list_actions, "Edit Selected", self.edit_selected_inventory_item, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
+        make_button(list_actions, "Deactivate Selected", self.deactivate_selected_inventory_item, "warning").grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
         tk.Label(body, text="Selected Preview", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)).grid(
-            row=2, column=0, sticky="w", pady=(16, 8)
+            row=3, column=0, sticky="w", pady=(16, 8)
         )
         self.inventory_preview_text = tk.Text(
             body,
-            height=7,
+            height=5,
             bg="#fbfdff",
             fg=TEXT,
             relief="flat",
@@ -1124,21 +1318,408 @@ class AdminPage(tk.Frame):
             font=(FONT, 10),
             wrap="word",
         )
-        self.inventory_preview_text.grid(row=3, column=0, sticky="nsew")
+        self.inventory_preview_text.grid(row=4, column=0, sticky="nsew")
         self.inventory_preview_text.configure(state="disabled")
         preview_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_preview_text.yview)
-        preview_scroll.grid(row=3, column=1, sticky="ns")
+        preview_scroll.grid(row=4, column=1, sticky="ns")
         self.inventory_preview_text.configure(yscrollcommand=preview_scroll.set)
 
-        list_actions = tk.Frame(body, bg=WHITE)
-        list_actions.grid(row=4, column=0, sticky="ew", pady=(14, 0))
-        list_actions.grid_columnconfigure((0, 1), weight=1)
-        make_button(list_actions, "Edit Selected", self.edit_selected_inventory_item, "primary").grid(
-            row=0, column=0, sticky="ew", padx=(0, 8)
+        # --- who is sitting in this account's slots ---
+        self.inventory_slot_title_label = tk.Label(
+            body, text="Clients On This Account", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12)
         )
-        make_button(list_actions, "Deactivate Selected", self.deactivate_selected_inventory_item, "warning").grid(
-            row=0, column=1, sticky="ew", padx=(8, 0)
+        self.inventory_slot_title_label.grid(row=5, column=0, sticky="w", pady=(16, 8))
+
+        slot_columns = ("email", "package", "added_by", "added", "updated")
+        self.inventory_slot_tree = ttk.Treeview(
+            body, columns=slot_columns, show="headings", height=5, selectmode="browse"
         )
+        slot_headings = {
+            "email": "Client Email",
+            "package": "Package",
+            "added_by": "Added By",
+            "added": "Added",
+            "updated": "Last Change",
+        }
+        slot_widths = {"email": 230, "package": 100, "added_by": 120, "added": 115, "updated": 145}
+        for column in slot_columns:
+            self.inventory_slot_tree.heading(column, text=slot_headings[column], anchor="w")
+            self.inventory_slot_tree.column(
+                column,
+                width=slot_widths[column],
+                minwidth=slot_widths[column],
+                anchor="w",
+                stretch=column == "email",
+            )
+        self.inventory_slot_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
+        self.inventory_slot_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        self.inventory_slot_tree.grid(row=6, column=0, sticky="nsew")
+        slot_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_slot_tree.yview)
+        slot_scroll.grid(row=6, column=1, sticky="ns")
+        self.inventory_slot_tree.configure(yscrollcommand=slot_scroll.set)
+
+        slot_actions = tk.Frame(body, bg=WHITE)
+        slot_actions.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        slot_actions.grid_columnconfigure((0, 1, 2), weight=1)
+        make_button(slot_actions, "Use A Slot", self.use_inventory_slot, "primary").grid(
+            row=0, column=0, sticky="ew", padx=(0, 6)
+        )
+        make_button(slot_actions, "Edit Client", self.edit_inventory_slot_use, "light").grid(
+            row=0, column=1, sticky="ew", padx=6
+        )
+        make_button(slot_actions, "Remove Client", self.remove_inventory_slot_use, "danger").grid(
+            row=0, column=2, sticky="ew", padx=(6, 0)
+        )
+        self._apply_inventory_kind()
+
+    # ================= Renewal Services (admin only) ====================
+    def _build_renewals_tab(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+
+        metrics = tk.Frame(parent, bg=BG)
+        metrics.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="renewal_metrics")
+        self.renewal_services_card = MetricCard(metrics, "Services", "0", BLUE, "Renewal services")
+        self.renewal_services_card.grid(row=0, column=0, sticky="ew", padx=(0, 9))
+        self.renewal_accounts_card = MetricCard(metrics, "Accounts", "0", TEAL, "Team accounts")
+        self.renewal_accounts_card.grid(row=0, column=1, sticky="ew", padx=3)
+        self.renewal_clients_card = MetricCard(metrics, "Clients", "0", SUCCESS, "Active subscriptions")
+        self.renewal_clients_card.grid(row=0, column=2, sticky="ew", padx=3)
+        self.renewal_expiring_card = MetricCard(metrics, "Need Attention", "0", DANGER, "Expiring or expired")
+        self.renewal_expiring_card.grid(row=0, column=3, sticky="ew", padx=(9, 0))
+
+        # --- Service headings, rendered as buttons ---
+        services_card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=NAVY, accent_end=BLUE)
+        services_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        services_body = services_card.body
+        services_body.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(services_body, bg=WHITE)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text="Services", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            header,
+            text="Add a service heading (Canva, Adobe, Prime...) then click it to open its accounts.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        make_button(header, "Add Service", self.add_renewal_service, "primary").grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(0, 8)
+        )
+        make_button(header, "Rename", self.rename_renewal_service, "light").grid(
+            row=0, column=2, rowspan=2, sticky="e", padx=(0, 8)
+        )
+        make_button(header, "Delete Service", self.delete_renewal_service, "danger").grid(
+            row=0, column=3, rowspan=2, sticky="e"
+        )
+        self.renewal_service_bar = tk.Frame(services_body, bg=WHITE)
+        self.renewal_service_bar.grid(row=1, column=0, columnspan=4, sticky="ew")
+
+        # --- Accounts of the selected service, and their clients ---
+        detail = tk.Frame(parent, bg=BG)
+        detail.grid(row=2, column=0, sticky="nsew")
+        detail.grid_columnconfigure(0, weight=2)
+        detail.grid_columnconfigure(1, weight=3)
+        detail.grid_rowconfigure(0, weight=1)
+
+        accounts_card = SurfaceCard(detail, padx=18, pady=16, accent=True, accent_start=BLUE, accent_end=TEAL)
+        accounts_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        accounts_body = accounts_card.body
+        accounts_body.grid_columnconfigure(0, weight=1)
+        accounts_body.grid_rowconfigure(2, weight=1)
+        self.renewal_title_label = tk.Label(
+            accounts_body, text="Accounts", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)
+        )
+        self.renewal_title_label.grid(row=0, column=0, sticky="w")
+        self.renewal_subtitle_label = tk.Label(
+            accounts_body, text="Select a service above.", bg=WHITE, fg=MUTED, font=(FONT, 9)
+        )
+        self.renewal_subtitle_label.grid(row=1, column=0, sticky="w", pady=(4, 10))
+
+        account_columns = ("email", "password", "number", "package", "sold", "expiry", "left", "clients")
+        self.renewal_accounts_tree = ttk.Treeview(
+            accounts_body, columns=account_columns, show="headings", height=7, selectmode="browse"
+        )
+        account_headings = {
+            "email": "Account Email",
+            "password": "Password",
+            "number": "Client Number",
+            "package": "Package",
+            "sold": "Sold",
+            "expiry": "Expires",
+            "left": "Days Left",
+            "clients": "Clients",
+        }
+        account_widths = {
+            "email": 170, "password": 105, "number": 125, "package": 80,
+            "sold": 95, "expiry": 95, "left": 100, "clients": 60,
+        }
+        for column in account_columns:
+            self.renewal_accounts_tree.heading(column, text=account_headings[column], anchor="w")
+            self.renewal_accounts_tree.column(
+                column,
+                width=account_widths[column],
+                minwidth=account_widths[column],
+                anchor="w",
+                stretch=column == "email",
+            )
+        # The account is sold in its own right, so it gets the same
+        # countdown colours as a client, plus a calm blue for stock.
+        self.renewal_accounts_tree.tag_configure("client_active", foreground=SUCCESS)
+        self.renewal_accounts_tree.tag_configure("client_expiring", foreground=DANGER, background="#fff4f5")
+        self.renewal_accounts_tree.tag_configure("client_expired", foreground=WHITE, background=DANGER)
+        self.renewal_accounts_tree.tag_configure("client_in_stock", foreground=BLUE, background="#f2f7ff")
+        self.renewal_accounts_tree.tag_configure("client_unknown", foreground=TEXT)
+        self.renewal_accounts_tree.grid(row=2, column=0, sticky="nsew")
+        self.renewal_accounts_tree.bind("<<TreeviewSelect>>", self._on_renewal_account_selected)
+        accounts_scroll = ttk.Scrollbar(accounts_body, orient="vertical", command=self.renewal_accounts_tree.yview)
+        accounts_scroll.grid(row=2, column=1, sticky="ns")
+        self.renewal_accounts_tree.configure(yscrollcommand=accounts_scroll.set)
+
+        account_form = tk.Frame(accounts_body, bg=WHITE)
+        account_form.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        account_form.grid_columnconfigure((0, 1), weight=1)
+        self._renewal_entry(account_form, "Account Email", self.renewal_email_var, 0, 0)
+        self._renewal_entry(account_form, "Password", self.renewal_password_var, 0, 1)
+        # Who bought the account itself. Optional - it shows as "-" if blank.
+        # Package sits beside it so the second column is not left empty with
+        # the password box hanging over the gap.
+        self._renewal_entry(account_form, "Client Number (optional)", self.renewal_number_var, 2, 0)
+        tk.Label(account_form, text="Sold Date", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).grid(
+            row=4, column=0, sticky="w"
+        )
+        self.renewal_sold_picker = DatePicker(account_form)
+        self.renewal_sold_picker.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 12))
+        for combo in (
+            self.renewal_sold_picker.day_combo,
+            self.renewal_sold_picker.month_combo,
+            self.renewal_sold_picker.year_combo,
+        ):
+            combo.bind("<<ComboboxSelected>>", lambda _event: self._update_account_expiry_preview(), add="+")
+
+        # The account itself is sold too, so it carries its own package.
+        tk.Label(account_form, text="Package", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).grid(
+            row=2, column=1, sticky="w", padx=(8, 0)
+        )
+        account_package_combo = ttk.Combobox(
+            account_form,
+            values=list(AttendanceStore.RENEWAL_PACKAGES.keys()),
+            textvariable=self.renewal_package_var,
+            state="readonly",
+            font=(FONT, 10),
+        )
+        account_package_combo.grid(row=3, column=1, sticky="ew", ipady=6, padx=(8, 0), pady=(6, 12))
+        account_package_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_account_expiry_preview())
+
+        self.renewal_account_expiry_preview = tk.Label(
+            account_form, text="", bg="#eafaf4", fg=SUCCESS, font=(FONT_BOLD, 10), padx=12, pady=8, anchor="w"
+        )
+        self.renewal_account_expiry_preview.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+
+        account_actions = tk.Frame(account_form, bg=WHITE)
+        account_actions.grid(row=7, column=0, columnspan=2, sticky="ew")
+        account_actions.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
+        self.renewal_account_save_button = make_button(
+            account_actions, "Add Account", self.save_renewal_account, "primary"
+        )
+        self.renewal_account_save_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        make_button(account_actions, "Clear", self.clear_renewal_account_form, "light").grid(
+            row=0, column=1, sticky="ew", padx=4
+        )
+        make_button(account_actions, "Renew", self.renew_selected_renewal_account, "success").grid(
+            row=0, column=2, sticky="ew", padx=4
+        )
+        close_button = make_button(account_actions, "Close", self.close_selected_renewal_account, "warning")
+        close_button.grid(row=0, column=3, sticky="ew", padx=4)
+        add_tooltip(
+            close_button,
+            lambda: "Client did not renew - clear the sale and put this account back in stock.",
+        )
+        make_button(account_actions, "Delete", self.delete_renewal_account, "danger").grid(
+            row=0, column=4, sticky="ew", padx=(4, 0)
+        )
+
+        clients_card = SurfaceCard(detail, padx=18, pady=16, accent=True, accent_start=TEAL, accent_end=SUCCESS)
+        clients_card.grid(row=0, column=1, sticky="nsew")
+        clients_body = clients_card.body
+        clients_body.grid_columnconfigure(0, weight=1)
+        clients_body.grid_rowconfigure(1, weight=1)
+        self.renewal_clients_title_label = tk.Label(
+            clients_body, text="Clients on this account", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)
+        )
+        self.renewal_clients_title_label.grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        client_columns = ("number", "email", "package", "purchase", "expiry", "left")
+        self.renewal_clients_tree = ttk.Treeview(
+            clients_body, columns=client_columns, show="headings", height=8, selectmode="browse"
+        )
+        client_headings = {
+            "number": "Client Number",
+            "email": "Client Email",
+            "package": "Package",
+            "purchase": "Purchased",
+            "expiry": "Expires",
+            "left": "Days Left",
+        }
+        client_widths = {"number": 150, "email": 210, "package": 100, "purchase": 115, "expiry": 115, "left": 115}
+        for column in client_columns:
+            self.renewal_clients_tree.heading(column, text=client_headings[column], anchor="w")
+            self.renewal_clients_tree.column(
+                column,
+                width=client_widths[column],
+                minwidth=client_widths[column],
+                anchor="w",
+                stretch=column in {"number", "email"},
+            )
+        # Green while there is time left, red inside the last 5 days, and a
+        # solid red block once expired - the countdown colour is the point.
+        self.renewal_clients_tree.tag_configure("client_active", foreground=SUCCESS)
+        self.renewal_clients_tree.tag_configure("client_expiring", foreground=DANGER, background="#fff4f5")
+        self.renewal_clients_tree.tag_configure("client_expired", foreground=WHITE, background=DANGER)
+        self.renewal_clients_tree.tag_configure("client_unknown", foreground=MUTED)
+        self.renewal_clients_tree.grid(row=1, column=0, sticky="nsew")
+        self.renewal_clients_tree.bind("<<TreeviewSelect>>", self._on_renewal_client_selected)
+        clients_scroll = ttk.Scrollbar(clients_body, orient="vertical", command=self.renewal_clients_tree.yview)
+        clients_scroll.grid(row=1, column=1, sticky="ns")
+        self.renewal_clients_tree.configure(yscrollcommand=clients_scroll.set)
+
+        client_form = tk.Frame(clients_body, bg=WHITE)
+        client_form.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        client_form.grid_columnconfigure((0, 1, 2), weight=1)
+        self._renewal_entry(client_form, "Client Number", self.client_number_var, 0, 0)
+        self._renewal_entry(client_form, "Client Email (optional)", self.client_email_var, 0, 1)
+
+        tk.Label(client_form, text="Package", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
+        )
+        package_combo = ttk.Combobox(
+            client_form,
+            values=list(AttendanceStore.RENEWAL_PACKAGES.keys()),
+            textvariable=self.client_package_var,
+            state="readonly",
+            font=(FONT, 10),
+        )
+        package_combo.grid(row=1, column=2, sticky="ew", ipady=4, padx=(8, 0), pady=(6, 12))
+        package_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_expiry_preview())
+
+        tk.Label(client_form, text="Purchase Date", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).grid(
+            row=2, column=0, sticky="w"
+        )
+        self.client_purchase_picker = DatePicker(client_form)
+        self.client_purchase_picker.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 12))
+        for combo in (
+            self.client_purchase_picker.day_combo,
+            self.client_purchase_picker.month_combo,
+            self.client_purchase_picker.year_combo,
+        ):
+            combo.bind("<<ComboboxSelected>>", lambda _event: self._update_expiry_preview(), add="+")
+
+        # Expiry is derived from purchase date + package, never typed.
+        self.client_expiry_preview = tk.Label(
+            client_form, text="", bg="#eafaf4", fg=SUCCESS, font=(FONT_BOLD, 10), padx=12, pady=8, anchor="w"
+        )
+        self.client_expiry_preview.grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=(6, 12))
+
+        client_actions = tk.Frame(client_form, bg=WHITE)
+        client_actions.grid(row=4, column=0, columnspan=3, sticky="ew")
+        client_actions.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.renewal_client_save_button = make_button(
+            client_actions, "Add Client", self.save_renewal_client, "primary"
+        )
+        self.renewal_client_save_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        make_button(client_actions, "Clear", self.clear_renewal_client_form, "light").grid(
+            row=0, column=1, sticky="ew", padx=4
+        )
+        make_button(client_actions, "Renew", self.renew_selected_renewal_client, "success").grid(
+            row=0, column=2, sticky="ew", padx=4
+        )
+        make_button(client_actions, "Remove", self.remove_selected_renewal_client, "danger").grid(
+            row=0, column=3, sticky="ew", padx=(4, 0)
+        )
+
+        self._build_renewal_reminders(parent)
+
+    def _renewal_entry(self, parent: tk.Misc, label: str, variable: tk.StringVar, row: int, column: int) -> None:
+        padx = (0 if column == 0 else 8, 0)
+        tk.Label(parent, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 9)).grid(
+            row=row, column=column, sticky="w", padx=padx
+        )
+        tk.Entry(
+            parent,
+            textvariable=variable,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 10),
+        ).grid(row=row + 1, column=column, sticky="ew", ipady=6, padx=padx, pady=(6, 12))
+
+    def _build_renewal_reminders(self, parent: tk.Frame) -> None:
+        card = SurfaceCard(parent, padx=18, pady=16, accent=True, accent_start=WARNING, accent_end=DANGER)
+        card.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
+        body = card.body
+        body.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(body, bg=WHITE)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text="Renewal Reminders", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 16)).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.renewal_reminders_subtitle = tk.Label(header, text="", bg=WHITE, fg=MUTED, font=(FONT, 9))
+        self.renewal_reminders_subtitle.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        make_button(header, "Mark Reminded", self.mark_reminder_done, "light").grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(0, 8)
+        )
+        make_button(header, "Renew", self.renew_selected_reminder, "success").grid(
+            row=0, column=2, rowspan=2, sticky="e", padx=(0, 8)
+        )
+        make_button(header, "Remove From Account", self.remove_selected_reminder, "danger").grid(
+            row=0, column=3, rowspan=2, sticky="e"
+        )
+
+        # Client number and client email are separate columns: the account
+        # email lives in its own column and must never be echoed as if it
+        # were the client's.
+        columns = ("kind", "number", "email", "service", "account", "package", "expiry", "left", "status")
+        self.renewal_reminders_tree = ttk.Treeview(
+            body, columns=columns, show="headings", height=7, selectmode="browse"
+        )
+        headings = {
+            "kind": "Type",
+            "number": "Client Number",
+            "email": "Client Email",
+            "service": "Service",
+            "account": "Account Email",
+            "package": "Package",
+            "expiry": "Expires",
+            "left": "Days Left",
+            "status": "Action Needed",
+        }
+        widths = {
+            "kind": 75, "number": 135, "email": 175, "service": 110, "account": 195,
+            "package": 85, "expiry": 100, "left": 105, "status": 175,
+        }
+        for column in columns:
+            self.renewal_reminders_tree.heading(column, text=headings[column], anchor="w")
+            self.renewal_reminders_tree.column(
+                column,
+                width=widths[column],
+                minwidth=widths[column],
+                anchor="w",
+                stretch=column in {"email", "account"},
+            )
+        self.renewal_reminders_tree.tag_configure("reminder_soon", foreground=DANGER, background="#fff4f5")
+        self.renewal_reminders_tree.tag_configure("reminder_expired", foreground=WHITE, background=DANGER)
+        self.renewal_reminders_tree.tag_configure("reminder_done", foreground=MUTED)
+        self.renewal_reminders_tree.grid(row=1, column=0, sticky="nsew")
+        reminders_scroll = ttk.Scrollbar(body, orient="vertical", command=self.renewal_reminders_tree.yview)
+        reminders_scroll.grid(row=1, column=1, sticky="ns")
+        self.renewal_reminders_tree.configure(yscrollcommand=reminders_scroll.set)
+
     def _build_service_catalog_tab(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=2)
         parent.grid_columnconfigure(1, weight=3)
@@ -1541,7 +2122,7 @@ class AdminPage(tk.Frame):
         self._refresh_cloud_settings()
         self._refresh_dashboard()
         self._refresh_employees()
-        shifts = self.app.attendance_store.list_shift_summaries()
+        shifts = self._current_month_shifts()
         self._refresh_metrics(shifts)
         self._refresh_shift_table(shifts)
         self._refresh_event_table(self.selected_shift_id)
@@ -1549,6 +2130,7 @@ class AdminPage(tk.Frame):
         self._refresh_service_catalog()
         self._refresh_message_templates()
         self._refresh_inventory_items()
+        self.refresh_renewals()
         self._refresh_sales_data()
 
     def _refresh_dashboard(self) -> None:
@@ -2428,11 +3010,54 @@ class AdminPage(tk.Frame):
         if self.inventory_save_button is not None:
             self.inventory_save_button.configure(text="Save Changes" if editing else "Save Inventory")
 
+    def _inventory_kind(self) -> str:
+        return INVENTORY_LABEL_TO_KIND.get(self.inventory_kind_label_var.get(), "timed")
+
+    def _apply_inventory_kind(self) -> None:
+        """Show only the fields the chosen kind actually uses - a shared
+        account has no purchase countdown and a timed one has no slots."""
+        kind = self._inventory_kind()
+        if self.inventory_kind_hint_label is not None:
+            self.inventory_kind_hint_label.configure(text=INVENTORY_KIND_HINTS[kind])
+        if self.inventory_timed_frame is not None:
+            if kind == "timed":
+                self.inventory_timed_frame.grid()
+            else:
+                self.inventory_timed_frame.grid_remove()
+        if self.inventory_slots_frame is not None:
+            if kind == "slots":
+                self.inventory_slots_frame.grid()
+            else:
+                self.inventory_slots_frame.grid_remove()
+        self._update_inventory_expiry_preview()
+
+    def _inventory_valid_days(self) -> int:
+        try:
+            return max(1, int(self.inventory_valid_days_var.get().strip() or "30"))
+        except ValueError:
+            return AttendanceStore.INVENTORY_DEFAULT_VALID_DAYS
+
+    def _update_inventory_expiry_preview(self) -> None:
+        if self.inventory_expiry_preview is None or self.inventory_purchase_picker is None:
+            return
+        purchase = self.inventory_purchase_picker.get_date()
+        expiry = ""
+        if purchase:
+            try:
+                expiry = (
+                    datetime.strptime(purchase, "%Y-%m-%d").date()
+                    + timedelta(days=self._inventory_valid_days())
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                expiry = ""
+        self._style_expiry_preview(self.inventory_expiry_preview, expiry, "Runs out")
+
     def save_inventory_item(self) -> None:
         service_name = self.inventory_service_var.get().strip()
         account_email = self.inventory_email_var.get().strip()
         account_password = self.inventory_password_var.get().strip()
         comment = self._inventory_comment_value()
+        kind = self._inventory_kind()
         if not service_name:
             show_app_alert(self, "Missing service", "Please add the service name before saving.", "warning")
             return
@@ -2442,6 +3067,34 @@ class AdminPage(tk.Frame):
         if not account_password:
             show_app_alert(self, "Missing password", "Please add the inventory password.", "warning")
             return
+        purchase_date = ""
+        total_slots = 0
+        if kind == "timed":
+            purchase_date = (
+                self.inventory_purchase_picker.get_date() if self.inventory_purchase_picker else ""
+            )
+        else:
+            try:
+                total_slots = int(self.inventory_slots_var.get().strip() or "0")
+            except ValueError:
+                total_slots = -1
+            if total_slots <= 0:
+                show_app_alert(
+                    self, "Check the slots", "Enter how many slots this shared account has (1 or more).", "warning"
+                )
+                return
+            taken = 0
+            if self.editing_inventory_id is not None:
+                existing = self.app.attendance_store.get_inventory_item(int(self.editing_inventory_id))
+                taken = int(existing["slots_used"]) if existing else 0
+            if total_slots < taken:
+                show_app_alert(
+                    self,
+                    "Too few slots",
+                    f"{taken} client(s) already use this account, so it needs at least {taken} slots.",
+                    "warning",
+                )
+                return
         if self.editing_inventory_id is None:
             saved = self.app.attendance_store.create_inventory_item(
                 service_name,
@@ -2449,6 +3102,10 @@ class AdminPage(tk.Frame):
                 account_password,
                 comment,
                 self.app.display_user,
+                item_kind=kind,
+                purchase_date=purchase_date,
+                valid_days=self._inventory_valid_days(),
+                total_slots=total_slots,
             )
             success_title = "Inventory saved"
         else:
@@ -2458,6 +3115,10 @@ class AdminPage(tk.Frame):
                 account_email,
                 account_password,
                 comment,
+                item_kind=kind,
+                purchase_date=purchase_date,
+                valid_days=self._inventory_valid_days(),
+                total_slots=total_slots,
             )
             success_title = "Inventory updated"
         self.selected_inventory_id = int(saved["id"])
@@ -2474,6 +3135,12 @@ class AdminPage(tk.Frame):
         self.inventory_service_var.set("")
         self.inventory_email_var.set("")
         self.inventory_password_var.set("")
+        self.inventory_kind_label_var.set(INVENTORY_KIND_LABELS["timed"])
+        self.inventory_valid_days_var.set(str(AttendanceStore.INVENTORY_DEFAULT_VALID_DAYS))
+        self.inventory_slots_var.set("5")
+        if self.inventory_purchase_picker is not None:
+            self.inventory_purchase_picker.set_date(date.today().strftime("%Y-%m-%d"))
+        self._apply_inventory_kind()
         if self.inventory_comment_text is not None:
             self.inventory_comment_text.delete("1.0", tk.END)
         if clear_selection and self.inventory_tree is not None:
@@ -2491,10 +3158,168 @@ class AdminPage(tk.Frame):
         self.inventory_service_var.set(item["service_name"])
         self.inventory_email_var.set(item["account_email"])
         self.inventory_password_var.set(item["account_password"])
+        kind = AttendanceStore.normalise_inventory_kind(item.get("item_kind"))
+        self.inventory_kind_label_var.set(INVENTORY_KIND_LABELS[kind])
+        self.inventory_valid_days_var.set(
+            str(item.get("valid_days") or AttendanceStore.INVENTORY_DEFAULT_VALID_DAYS)
+        )
+        self.inventory_slots_var.set(str(item.get("total_slots") or 0))
+        if self.inventory_purchase_picker is not None:
+            self.inventory_purchase_picker.set_date(
+                item.get("purchase_date") or date.today().strftime("%Y-%m-%d")
+            )
+        self._apply_inventory_kind()
         if self.inventory_comment_text is not None:
             self.inventory_comment_text.delete("1.0", tk.END)
             self.inventory_comment_text.insert("1.0", item.get("comment", ""))
         self._refresh_inventory_form_state()
+
+    def _inventory_status_text(self, item: dict) -> str:
+        return inventory_status_text(item)
+
+    # ----- slots on a shared account -----------------------------------
+    def _refresh_inventory_slot_uses(self) -> None:
+        if self.inventory_slot_tree is None:
+            return
+        for row in self.inventory_slot_tree.get_children():
+            self.inventory_slot_tree.delete(row)
+        item = self._inventory_by_id(self.selected_inventory_id)
+        if item is None or item.get("item_kind") != "slots":
+            self.inventory_slot_uses = []
+            self.selected_inventory_slot_id = None
+            if self.inventory_slot_title_label is not None:
+                self.inventory_slot_title_label.configure(
+                    text="Clients On This Account  -  select a shared (slots) account to see them"
+                )
+            return
+        self.inventory_slot_uses = self.app.attendance_store.list_inventory_slot_uses(
+            item_id=int(item["id"]),
+            item_cloud_id=str(item.get("cloud_id", "")),
+        )
+        if self.inventory_slot_title_label is not None:
+            self.inventory_slot_title_label.configure(
+                text=f"Clients On {item['account_email']}  -  {self._inventory_status_text(item)}"
+            )
+        valid_ids: set[int] = set()
+        for index, use in enumerate(self.inventory_slot_uses):
+            use_id = int(use["id"])
+            valid_ids.add(use_id)
+            self.inventory_slot_tree.insert(
+                "",
+                "end",
+                iid=str(use_id),
+                tags=("inventory_even" if index % 2 == 0 else "inventory_odd",),
+                values=(
+                    use["client_email"] or "-",
+                    use["package"] or "-",
+                    use["used_by"] or "-",
+                    self._format_short_date(use["created_at"]),
+                    self._slot_change_text(use),
+                ),
+            )
+        if self.selected_inventory_slot_id not in valid_ids:
+            self.selected_inventory_slot_id = None
+
+    def _slot_change_text(self, use: dict) -> str:
+        """Say who last touched this slot, so both sides can see an email
+        was corrected and by whom."""
+        changed = str(use.get("updated_at", ""))
+        by = str(use.get("updated_by", "") or use.get("used_by", ""))
+        stamp = self._format_short_date(changed)
+        return f"{stamp} by {by}" if by else stamp
+
+    def _selected_slot_use(self) -> dict | None:
+        selection = self.inventory_slot_tree.selection() if self.inventory_slot_tree else ()
+        if selection:
+            self.selected_inventory_slot_id = int(selection[0])
+        for use in self.inventory_slot_uses:
+            if int(use["id"]) == self.selected_inventory_slot_id:
+                return use
+        return None
+
+    def use_inventory_slot(self) -> None:
+        item = self._inventory_by_id(self.selected_inventory_id)
+        if item is None:
+            show_app_alert(self, "No inventory selected", "Select an inventory item first.", "warning")
+            return
+        if item.get("item_kind") != "slots":
+            show_app_alert(
+                self,
+                "Not a shared account",
+                "Only a shared (slots) account can seat clients. Timed services are sold whole.",
+                "warning",
+            )
+            return
+        if int(item.get("slots_left") or 0) <= 0:
+            show_app_alert(self, "No slots left", f"{item['account_email']} is full.", "warning")
+            return
+        details = ask_slot_details(
+            self,
+            "Use a slot",
+            f"{item['service_name']} - {item['account_email']}  "
+            f"({item['slots_left']} of {item['total_slots']} free)",
+        )
+        if details is None:
+            return
+        try:
+            self.app.attendance_store.create_inventory_slot_use(
+                int(item["id"]), details["client_email"], details["package"], "", self.app.display_user
+            )
+        except ValueError as exc:
+            show_app_alert(self, "Slot not saved", str(exc), "warning")
+            return
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(
+            self, "Slot used", f"{details['client_email']} was added to {item['account_email']}.", "success"
+        )
+
+    def edit_inventory_slot_use(self) -> None:
+        use = self._selected_slot_use()
+        if use is None:
+            show_app_alert(self, "No client selected", "Select a client from the slot list first.", "warning")
+            return
+        details = ask_slot_details(
+            self,
+            "Edit client",
+            "Clients change their email - update it here and the other PC picks it up.",
+            client_email=use["client_email"],
+            package=use["package"],
+            confirm_text="Save Changes",
+        )
+        if details is None:
+            return
+        try:
+            self.app.attendance_store.update_inventory_slot_use(
+                int(use["id"]), details["client_email"], details["package"], use.get("notes", ""),
+                self.app.display_user,
+            )
+        except ValueError as exc:
+            show_app_alert(self, "Not saved", str(exc), "warning")
+            return
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, "Client updated", f"Now saved as {details['client_email']}.", "success")
+
+    def remove_inventory_slot_use(self) -> None:
+        use = self._selected_slot_use()
+        if use is None:
+            show_app_alert(self, "No client selected", "Select a client from the slot list first.", "warning")
+            return
+        item = self._inventory_by_id(self.selected_inventory_id)
+        where = item["account_email"] if item else "this account"
+        if not messagebox.askyesno(
+            "Remove client",
+            f"Remove {use['client_email']} from {where}?\n\n"
+            "The slot goes back to free and the client disappears from the employee's list too.",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.remove_inventory_slot_use(int(use["id"]), self.app.display_user)
+        self.selected_inventory_slot_id = None
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, "Client removed", f"That slot on {where} is free again.", "success")
 
     def deactivate_selected_inventory_item(self) -> None:
         item = self._inventory_by_id(self.selected_inventory_id)
@@ -2515,6 +3340,676 @@ class AdminPage(tk.Frame):
         self._refresh_inventory_items()
         self.app.request_cloud_sync(push_local=True)
         show_app_alert(self, "Inventory deactivated", "Employees will no longer see this item.", "success")
+
+    # ================= Renewal Services behaviour =======================
+    def _client_days_text(self, client: dict) -> str:
+        days_left = client.get("days_left")
+        if days_left is None:
+            return "in stock" if client.get("in_stock") else "no expiry set"
+        if days_left < 0:
+            return f"expired {abs(days_left)}d ago"
+        if days_left == 0:
+            return "expires today"
+        if days_left == 1:
+            return "1 day left"
+        return f"{days_left} days left"
+
+    def refresh_renewals(self) -> None:
+        self._refresh_renewal_services()
+        self._refresh_renewal_accounts()
+        self._refresh_renewal_clients()
+        self._refresh_renewal_reminders()
+        self._refresh_renewal_metrics()
+
+    def _refresh_renewal_metrics(self) -> None:
+        if self.renewal_services_card is None:
+            return
+        counts = self.app.attendance_store.renewal_counts()
+        self.renewal_services_card.value_label.configure(text=str(counts["services"]))
+        self.renewal_accounts_card.value_label.configure(text=str(counts["accounts"]))
+        self.renewal_accounts_card.helper_label.configure(
+            text=f"{counts['accounts'] - counts['in_stock']} sold | {counts['in_stock']} in stock"
+        )
+        self.renewal_clients_card.value_label.configure(text=str(counts["clients"]))
+        self.renewal_expiring_card.value_label.configure(text=str(counts["expiring"] + counts["expired"]))
+
+    def _refresh_renewal_services(self) -> None:
+        """Each service heading is rendered as its own button; the selected
+        one is highlighted."""
+        if self.renewal_service_bar is None:
+            return
+        for child in self.renewal_service_bar.winfo_children():
+            child.destroy()
+        self.renewal_service_buttons = {}
+        self.renewal_services = self.app.attendance_store.list_renewal_services()
+        if not self.renewal_services:
+            tk.Label(
+                self.renewal_service_bar,
+                text="No services yet - click Add Service to create one (for example Canva).",
+                bg=WHITE,
+                fg=MUTED,
+                font=(FONT, 10),
+            ).grid(row=0, column=0, sticky="w")
+            self.selected_renewal_service_id = None
+            return
+        valid_ids = {int(service["id"]) for service in self.renewal_services}
+        if self.selected_renewal_service_id not in valid_ids:
+            self.selected_renewal_service_id = int(self.renewal_services[0]["id"])
+        per_row = 6
+        for index, service in enumerate(self.renewal_services):
+            service_id = int(service["id"])
+            selected = service_id == self.selected_renewal_service_id
+            button = make_button(
+                self.renewal_service_bar,
+                service["name"],
+                lambda sid=service_id: self.select_renewal_service(sid),
+                "primary" if selected else "light",
+            )
+            button.grid(
+                row=index // per_row,
+                column=index % per_row,
+                sticky="ew",
+                padx=(0 if index % per_row == 0 else 8, 0),
+                pady=(0 if index < per_row else 8, 0),
+            )
+            self.renewal_service_bar.grid_columnconfigure(index % per_row, weight=1, uniform="renewal_service")
+            self.renewal_service_buttons[service_id] = button
+
+    def select_renewal_service(self, service_id: int) -> None:
+        self.selected_renewal_service_id = int(service_id)
+        self.selected_renewal_account_id = None
+        self.clear_renewal_account_form()
+        self.clear_renewal_client_form()
+        self.refresh_renewals()
+
+    def _selected_service(self) -> dict | None:
+        for service in self.renewal_services:
+            if int(service["id"]) == self.selected_renewal_service_id:
+                return service
+        return None
+
+    def _refresh_renewal_accounts(self) -> None:
+        if self.renewal_accounts_tree is None:
+            return
+        for row in self.renewal_accounts_tree.get_children():
+            self.renewal_accounts_tree.delete(row)
+        service = self._selected_service()
+        if service is None:
+            self.renewal_accounts = []
+            self.renewal_title_label.configure(text="Accounts")
+            self.renewal_subtitle_label.configure(text="Add a service first.")
+            return
+        self.renewal_accounts = self.app.attendance_store.list_renewal_accounts(service_id=int(service["id"]))
+        self.renewal_title_label.configure(text=f"{service['name']} accounts")
+
+        client_counts: dict[int, int] = {}
+        for client in self.app.attendance_store.list_renewal_clients(service_id=int(service["id"])):
+            key = int(client["account_id"])
+            client_counts[key] = client_counts.get(key, 0) + 1
+
+        valid_ids: set[int] = set()
+        first_id: int | None = None
+        for index, account in enumerate(self.renewal_accounts):
+            account_id = int(account["id"])
+            valid_ids.add(account_id)
+            if first_id is None:
+                first_id = account_id
+            self.renewal_accounts_tree.insert(
+                "",
+                "end",
+                iid=str(account_id),
+                tags=(f"client_{account['state']}",),
+                values=(
+                    account["account_email"] or "-",
+                    account["account_password"] or "-",
+                    account.get("client_number") or "-",
+                    account.get("package") or "-",
+                    self._format_date(account["sold_date"]) if account["sold_date"] else "-",
+                    self._format_date(account["expiry_date"]) if account["expiry_date"] else "-",
+                    self._client_days_text(account),
+                    str(client_counts.get(account_id, 0)),
+                ),
+            )
+        needing = sum(1 for a in self.renewal_accounts if a["state"] in {"expiring", "expired"})
+        in_stock = sum(1 for a in self.renewal_accounts if a.get("in_stock"))
+        subtitle = f"{len(self.renewal_accounts)} account(s) | click one to see its clients"
+        if in_stock:
+            subtitle += f"  -  {in_stock} in stock"
+        if needing:
+            subtitle += f"  -  {needing} need renewing"
+        self.renewal_subtitle_label.configure(text=subtitle)
+        if self.selected_renewal_account_id not in valid_ids:
+            self.selected_renewal_account_id = first_id
+        if self.selected_renewal_account_id is not None:
+            self.renewal_accounts_tree.selection_set(str(self.selected_renewal_account_id))
+
+    def _selected_account(self) -> dict | None:
+        for account in self.renewal_accounts:
+            if int(account["id"]) == self.selected_renewal_account_id:
+                return account
+        return None
+
+    def _on_renewal_account_selected(self, _event: tk.Event) -> None:
+        selection = self.renewal_accounts_tree.selection() if self.renewal_accounts_tree else ()
+        if not selection:
+            return
+        self.selected_renewal_account_id = int(selection[0])
+        account = self._selected_account()
+        if account is not None:
+            self.renewal_email_var.set(account["account_email"])
+            self.renewal_password_var.set(account["account_password"])
+            self.renewal_number_var.set(account.get("client_number") or "")
+            self.renewal_package_var.set(account.get("package") or "1 Month")
+            if self.renewal_sold_picker is not None:
+                # A closed account has no sold date - fall back to today
+                # rather than leaving the previous account's date sitting
+                # there and previewing an expiry that was never real.
+                self.renewal_sold_picker.set_date(
+                    account["sold_date"] or date.today().strftime("%Y-%m-%d")
+                )
+            self._update_account_expiry_preview(in_stock=bool(account.get("in_stock")))
+            if self.renewal_account_save_button is not None:
+                self.renewal_account_save_button.configure(text="Save Account")
+        self.clear_renewal_client_form()
+        self._refresh_renewal_clients()
+
+    def _refresh_renewal_clients(self) -> None:
+        if self.renewal_clients_tree is None:
+            return
+        for row in self.renewal_clients_tree.get_children():
+            self.renewal_clients_tree.delete(row)
+        account = self._selected_account()
+        if account is None:
+            self.renewal_clients = []
+            self.renewal_clients_title_label.configure(text="Clients on this account")
+            return
+        self.renewal_clients = self.app.attendance_store.list_renewal_clients(account_id=int(account["id"]))
+        needing = sum(1 for c in self.renewal_clients if c["state"] in {"expiring", "expired"})
+        title = f"Clients on {account['account_email']} ({len(self.renewal_clients)})"
+        if needing:
+            title += f"  -  {needing} need attention"
+        self.renewal_clients_title_label.configure(text=title)
+        valid_ids: set[int] = set()
+        for client in self.renewal_clients:
+            client_id = int(client["id"])
+            valid_ids.add(client_id)
+            self.renewal_clients_tree.insert(
+                "",
+                "end",
+                iid=str(client_id),
+                tags=(f"client_{client['state']}",),
+                values=(
+                    client["client_number"] or "-",
+                    client["client_email"] or "-",
+                    client.get("package") or "-",
+                    self._format_date(client["purchase_date"]) if client["purchase_date"] else "-",
+                    self._format_date(client["expiry_date"]) if client["expiry_date"] else "-",
+                    self._client_days_text(client),
+                ),
+            )
+        if self.selected_renewal_client_id not in valid_ids:
+            self.selected_renewal_client_id = None
+
+    def _refresh_renewal_reminders(self) -> None:
+        if self.renewal_reminders_tree is None:
+            return
+        for row in self.renewal_reminders_tree.get_children():
+            self.renewal_reminders_tree.delete(row)
+        reminders = self.app.attendance_store.list_renewal_reminders()
+        for record in reminders:
+            is_account = record["kind"] == "account"
+            if record["state"] == "expired":
+                tag = "reminder_expired"
+                action = "Renew the account" if is_account else "Remove from account"
+            elif str(record.get("reminded_at", "")).strip():
+                tag = "reminder_done"
+                action = f"Reminded {self._format_short_date(record['reminded_at'])}"
+            else:
+                tag = "reminder_soon"
+                action = "Renew the account" if is_account else "Remind client to renew"
+            self.renewal_reminders_tree.insert(
+                "",
+                "end",
+                iid=self._reminder_iid(record),
+                tags=(tag,),
+                values=(
+                    "Account" if is_account else "Client",
+                    record.get("client_number") or "-",
+                    ("-" if is_account else record.get("client_email")) or "-",
+                    record["service_name"],
+                    record["account_email"],
+                    record.get("package") or "-",
+                    self._format_date(record["expiry_date"]) if record["expiry_date"] else "-",
+                    self._client_days_text(record),
+                    action,
+                ),
+            )
+        expired = sum(1 for r in reminders if r["state"] == "expired")
+        soon = len(reminders) - expired
+        if reminders:
+            accounts = sum(1 for r in reminders if r["kind"] == "account")
+            self.renewal_reminders_subtitle.configure(
+                text=(
+                    f"{soon} expiring within 5 days | {expired} already expired"
+                    f" | {accounts} of these are the accounts themselves"
+                )
+            )
+        else:
+            self.renewal_reminders_subtitle.configure(text="No renewals due in the next 5 days.")
+
+    @staticmethod
+    def _reminder_iid(record: dict) -> str:
+        """Accounts and clients share the reminder list, and their ids can
+        collide, so the row id carries the kind."""
+        return f"{record['kind']}:{int(record['id'])}"
+
+
+    # ----- service actions -----
+    def add_renewal_service(self) -> None:
+        name = ask_app_text(
+            self,
+            "Add Service",
+            "Service name",
+            subtitle="Creates a button in the Services row, for example Canva, Adobe or Prime.",
+            confirm_text="Add Service",
+        )
+        if not name:
+            return
+        service = self.app.attendance_store.create_renewal_service(name)
+        self.selected_renewal_service_id = int(service["id"])
+        self.selected_renewal_account_id = None
+        self.refresh_renewals()
+        show_app_alert(self, "Service added", f"{service['name']} is ready for accounts.", "success")
+
+    def rename_renewal_service(self) -> None:
+        service = self._selected_service()
+        if service is None:
+            show_app_alert(self, "No service selected", "Add or select a service first.", "warning")
+            return
+        name = ask_app_text(
+            self,
+            "Rename Service",
+            "New service name",
+            initial=service["name"],
+            confirm_text="Rename",
+        )
+        if not name:
+            return
+        self.app.attendance_store.rename_renewal_service(int(service["id"]), name)
+        self.refresh_renewals()
+        show_app_alert(self, "Service renamed", f"Now called {name.strip()}.", "success")
+
+    def delete_renewal_service(self) -> None:
+        service = self._selected_service()
+        if service is None:
+            show_app_alert(self, "No service selected", "Add or select a service first.", "warning")
+            return
+        if not messagebox.askyesno(
+            "Delete service",
+            f"Delete '{service['name']}' with all of its accounts and clients?",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.remove_renewal_service(int(service["id"]))
+        self.selected_renewal_service_id = None
+        self.selected_renewal_account_id = None
+        self.refresh_renewals()
+        show_app_alert(self, "Service deleted", f"{service['name']} was removed.", "success")
+
+    # ----- account actions -----
+    def save_renewal_account(self) -> None:
+        service = self._selected_service()
+        if service is None:
+            show_app_alert(self, "No service selected", "Add or select a service first.", "warning")
+            return
+        email = self.renewal_email_var.get().strip()
+        if not email:
+            show_app_alert(self, "Missing email", "Enter the account email.", "warning")
+            return
+        sold = self.renewal_sold_picker.get_date() if self.renewal_sold_picker else ""
+        package = self.renewal_package_var.get()
+        number = self.renewal_number_var.get().strip()
+        editing = self._selected_account() is not None and self.renewal_account_save_button is not None \
+            and self.renewal_account_save_button.cget("text") == "Save Account"
+        if editing:
+            self.app.attendance_store.update_renewal_account(
+                int(self.selected_renewal_account_id), email, self.renewal_password_var.get(), sold, package, number
+            )
+            message = f"{email} was updated."
+        else:
+            account = self.app.attendance_store.create_renewal_account(
+                int(service["id"]), email, self.renewal_password_var.get(), sold, package, number,
+                "", self.app.display_user,
+            )
+            self.selected_renewal_account_id = int(account["id"])
+            message = f"{email} was added to {service['name']}."
+        self.clear_renewal_account_form()
+        self.refresh_renewals()
+        show_app_alert(self, "Account saved", message, "success")
+
+    def _style_expiry_preview(self, label: tk.Label, expiry: str, prefix: str, in_stock: bool = False) -> None:
+        """Colour the preview by what the date actually means.
+
+        A date that has already passed must not read as a healthy green -
+        that is how an expired account ended up looking fine.
+        """
+        if in_stock:
+            label.configure(text="In stock  -  not sold to anyone yet", bg="#f2f7ff", fg=BLUE)
+            return
+        if not expiry:
+            label.configure(text=f"{prefix}  -", bg="#f4f6fa", fg=MUTED)
+            return
+        pretty = self._format_date(expiry)
+        try:
+            days = (datetime.strptime(expiry, "%Y-%m-%d").date() - date.today()).days
+        except ValueError:
+            label.configure(text=f"{prefix}  {pretty}", bg="#f4f6fa", fg=MUTED)
+            return
+        if days < 0:
+            label.configure(
+                text=f"Expired  {pretty}  ({abs(days)} day{'s' if days != -1 else ''} ago)",
+                bg="#fff4f5",
+                fg=DANGER,
+            )
+        elif days <= AttendanceStore.CLIENT_REMINDER_DAYS:
+            left = "expires today" if days == 0 else f"{days} day{'s' if days != 1 else ''} left"
+            label.configure(text=f"{prefix}  {pretty}  ({left})", bg="#fff4f5", fg=DANGER)
+        else:
+            label.configure(text=f"{prefix}  {pretty}  ({days} days left)", bg="#eafaf4", fg=SUCCESS)
+
+    def _update_account_expiry_preview(self, in_stock: bool = False) -> None:
+        """Same live preview the client form has - sold date + package tells
+        the admin exactly when the account itself runs out."""
+        if self.renewal_account_expiry_preview is None or self.renewal_sold_picker is None:
+            return
+        expiry = self.app.attendance_store.expiry_for_package(
+            self.renewal_sold_picker.get_date(), self.renewal_package_var.get()
+        )
+        self._style_expiry_preview(
+            self.renewal_account_expiry_preview, expiry, "Account expires", in_stock=in_stock
+        )
+
+    def renew_selected_renewal_account(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            show_app_alert(self, "No account selected", "Select an account from the list first.", "warning")
+            return
+        if account.get("in_stock"):
+            show_app_alert(
+                self,
+                "Account is in stock",
+                "This account is not sold to anyone. Set a sold date and package, then save it.",
+                "warning",
+            )
+            return
+        if self._renew_account(account):
+            self.clear_renewal_account_form()
+            self.refresh_renewals()
+            show_app_alert(self, "Account renewed", "The account window was extended.", "success")
+
+    def _renew_account(self, account: dict) -> bool:
+        """Renewing adds another package length on top of whatever time the
+        account has left, exactly like a client renewal."""
+        chosen = ask_app_choice(
+            self,
+            "Renew account",
+            "Add another package:",
+            list(AttendanceStore.RENEWAL_PACKAGES.keys()),
+            subtitle=f"{account['account_email']} ({account.get('service_name', '')})".strip(),
+            confirm_text="Renew",
+        )
+        if not chosen:
+            return False
+        self.app.attendance_store.renew_renewal_account(int(account["id"]), chosen)
+        return True
+
+    def close_selected_renewal_account(self) -> None:
+        """The client did not renew: wipe the sale so the account reads as
+        in stock and can be sold again. The login itself is kept."""
+        account = self._selected_account()
+        if account is None:
+            show_app_alert(self, "No account selected", "Select an account from the list first.", "warning")
+            return
+        if account.get("in_stock"):
+            show_app_alert(self, "Already in stock", f"{account['account_email']} is not sold to anyone.", "info")
+            return
+        clients = self.app.attendance_store.list_renewal_clients(account_id=int(account["id"]))
+        extra = f"\n\n{len(clients)} client(s) on it stay as they are." if clients else ""
+        if not messagebox.askyesno(
+            "Close account",
+            f"Close {account['account_email']}?\n\n"
+            "The client number, sold date, package and expiry are cleared and the account "
+            f"goes back to In Stock. The email and password are kept.{extra}",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.close_renewal_account(int(account["id"]))
+        self.clear_renewal_account_form()
+        self.refresh_renewals()
+        show_app_alert(
+            self, "Account closed", f"{account['account_email']} is back in stock and ready to sell.", "success"
+        )
+
+    def clear_renewal_account_form(self) -> None:
+        self.renewal_email_var.set("")
+        self.renewal_password_var.set("")
+        self.renewal_number_var.set("")
+        self.renewal_package_var.set("1 Month")
+        if self.renewal_sold_picker is not None:
+            self.renewal_sold_picker.set_date(date.today().strftime("%Y-%m-%d"))
+        self._update_account_expiry_preview()
+        if self.renewal_account_save_button is not None:
+            self.renewal_account_save_button.configure(text="Add Account")
+
+    def delete_renewal_account(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            show_app_alert(self, "No account selected", "Select an account from the list first.", "warning")
+            return
+        if not messagebox.askyesno(
+            "Delete account",
+            f"Delete {account['account_email']} and all clients on it?",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.remove_renewal_account(int(account["id"]))
+        self.selected_renewal_account_id = None
+        self.clear_renewal_account_form()
+        self.refresh_renewals()
+        show_app_alert(self, "Account deleted", f"{account['account_email']} was removed.", "success")
+
+    # ----- client actions -----
+    def _update_expiry_preview(self) -> None:
+        """Show the expiry the chosen purchase date + package produces, so
+        the admin sees it before saving."""
+        if self.client_expiry_preview is None or self.client_purchase_picker is None:
+            return
+        expiry = self.app.attendance_store.expiry_for_package(
+            self.client_purchase_picker.get_date(), self.client_package_var.get()
+        )
+        self._style_expiry_preview(self.client_expiry_preview, expiry, "Expires")
+
+    def _renewal_client_by_id(self, client_id: int | None) -> dict | None:
+        if client_id is None:
+            return None
+        for client in self.renewal_clients:
+            if int(client["id"]) == int(client_id):
+                return client
+        return None
+
+    def _on_renewal_client_selected(self, _event: tk.Event) -> None:
+        selection = self.renewal_clients_tree.selection() if self.renewal_clients_tree else ()
+        if not selection:
+            return
+        self.selected_renewal_client_id = int(selection[0])
+        client = self._renewal_client_by_id(self.selected_renewal_client_id)
+        if client is None:
+            return
+        self.client_number_var.set(client["client_number"])
+        self.client_email_var.set(client["client_email"])
+        self.client_package_var.set(client.get("package") or "1 Month")
+        if self.client_purchase_picker is not None and client["purchase_date"]:
+            self.client_purchase_picker.set_date(client["purchase_date"])
+        self._update_expiry_preview()
+        if self.renewal_client_save_button is not None:
+            self.renewal_client_save_button.configure(text="Save Client")
+
+    def save_renewal_client(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            show_app_alert(self, "No account selected", "Select an account first.", "warning")
+            return
+        number = self.client_number_var.get().strip()
+        email = self.client_email_var.get().strip()
+        if not number and not email:
+            show_app_alert(self, "Missing client", "Enter the client number (or their email).", "warning")
+            return
+        purchase = self.client_purchase_picker.get_date() if self.client_purchase_picker else ""
+        package = self.client_package_var.get()
+        label = number or email
+        editing = self._renewal_client_by_id(self.selected_renewal_client_id) is not None
+        if editing:
+            self.app.attendance_store.update_renewal_client(
+                int(self.selected_renewal_client_id), number, email, purchase, package
+            )
+            message = f"{label} was updated."
+        else:
+            self.app.attendance_store.create_renewal_client(
+                int(account["id"]), number, email, purchase, package, "", self.app.display_user
+            )
+            message = f"{label} was added to {account['account_email']}."
+        self.clear_renewal_client_form()
+        self.refresh_renewals()
+        show_app_alert(self, "Client saved", message, "success")
+
+    def clear_renewal_client_form(self) -> None:
+        self.selected_renewal_client_id = None
+        self.client_number_var.set("")
+        self.client_email_var.set("")
+        self.client_package_var.set("1 Month")
+        if self.client_purchase_picker is not None:
+            self.client_purchase_picker.set_date(date.today().strftime("%Y-%m-%d"))
+        self._update_expiry_preview()
+        if self.renewal_client_save_button is not None:
+            self.renewal_client_save_button.configure(text="Add Client")
+
+    def _ask_new_expiry(self, client: dict) -> bool:
+        """Renewing adds another package length of time on top of whatever
+        is left, so the admin only picks the package."""
+        packages = list(AttendanceStore.RENEWAL_PACKAGES.keys())
+        label = client["client_number"] or client["client_email"] or "this client"
+        chosen = ask_app_choice(
+            self,
+            "Renew client",
+            "Add another package:",
+            packages,
+            subtitle=f"{label} on {client['account_email']} ({client['service_name']})",
+            confirm_text="Renew",
+        )
+        if not chosen:
+            return False
+        renewed = self.app.attendance_store.renew_renewal_client(int(client["id"]), chosen)
+        self._last_renewal_expiry = renewed["expiry_date"]
+        return True
+
+    def renew_selected_renewal_client(self) -> None:
+        client = self._renewal_client_by_id(self.selected_renewal_client_id)
+        if client is None:
+            show_app_alert(self, "No client selected", "Select a client from the list first.", "warning")
+            return
+        if self._ask_new_expiry(client):
+            self.clear_renewal_client_form()
+            self.refresh_renewals()
+            show_app_alert(self, "Client renewed", "The subscription window was extended.", "success")
+
+    def remove_selected_renewal_client(self) -> None:
+        client = self._renewal_client_by_id(self.selected_renewal_client_id)
+        if client is None:
+            show_app_alert(self, "No client selected", "Select a client from the list first.", "warning")
+            return
+        label = client["client_number"] or client["client_email"] or "this client"
+        if not messagebox.askyesno(
+            "Remove client",
+            f"Remove {label} from {client['account_email']}?\n\n"
+            "Do this once you have taken them off the real account.",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.remove_renewal_client(int(client["id"]))
+        self.clear_renewal_client_form()
+        self.refresh_renewals()
+        show_app_alert(self, "Client removed", f"{label} is no longer on that account.", "success")
+
+    # ----- reminder actions -----
+    def _selected_reminder(self) -> dict | None:
+        """The reminder list mixes accounts and clients, so match on the
+        kind-prefixed row id rather than the bare number."""
+        selection = self.renewal_reminders_tree.selection() if self.renewal_reminders_tree else ()
+        if not selection:
+            show_app_alert(self, "No reminder selected", "Select a row from the reminder list first.", "warning")
+            return None
+        wanted = str(selection[0])
+        for record in self.app.attendance_store.list_renewal_reminders():
+            if self._reminder_iid(record) == wanted:
+                return record
+        return None
+
+    def mark_reminder_done(self) -> None:
+        record = self._selected_reminder()
+        if record is None:
+            return
+        store = self.app.attendance_store
+        if record["kind"] == "account":
+            store.mark_renewal_account_reminded(int(record["id"]))
+        else:
+            store.mark_renewal_client_reminded(int(record["id"]))
+        self.refresh_renewals()
+        show_app_alert(
+            self,
+            "Marked as reminded",
+            f"{self._reminder_display(record)} is marked as contacted.",
+            "success",
+        )
+
+    def _reminder_display(self, record: dict) -> str:
+        if record["kind"] == "account":
+            return f"Account {record['account_email']}"
+        return record["client_number"] or record["client_email"] or "This client"
+
+    def renew_selected_reminder(self) -> None:
+        record = self._selected_reminder()
+        if record is None:
+            return
+        renewed = self._renew_account(record) if record["kind"] == "account" else self._ask_new_expiry(record)
+        if renewed:
+            self.refresh_renewals()
+            what = "account" if record["kind"] == "account" else "client"
+            show_app_alert(self, f"{what.title()} renewed", "The subscription window was extended.", "success")
+
+    def remove_selected_reminder(self) -> None:
+        record = self._selected_reminder()
+        if record is None:
+            return
+        if record["kind"] == "account":
+            show_app_alert(
+                self,
+                "Accounts are not removed here",
+                "This row is the account itself. Renew it, or delete it from the accounts list.",
+                "warning",
+            )
+            return
+        label = record["client_number"] or record["client_email"] or "this client"
+        if not messagebox.askyesno(
+            "Remove client",
+            f"Remove {label} from {record['account_email']}?\n\n"
+            "Do this once you have taken them off the real account.",
+            parent=self,
+        ):
+            return
+        self.app.attendance_store.remove_renewal_client(int(record["id"]))
+        self.refresh_renewals()
+        show_app_alert(self, "Client removed", f"{label} is no longer on that account.", "success")
+
     def _refresh_cloud_settings(self) -> None:
         config = self.app.load_supabase_config()
         self.supabase_enabled_var.set(config.enabled)
@@ -2757,15 +4252,16 @@ class AdminPage(tk.Frame):
             valid_ids.add(item_id)
             if first_id is None:
                 first_id = item_id
-            tag = "inventory_even" if index % 2 == 0 else "inventory_odd"
             self.inventory_tree.insert(
                 "",
                 "end",
                 iid=str(item_id),
-                tags=(tag,),
+                tags=(f"inventory_{item['state']}",),
                 values=(
                     item["service_name"],
                     item["account_email"],
+                    "Slots" if item["item_kind"] == "slots" else "Timed",
+                    self._inventory_status_text(item),
                     self._format_short_date(item["updated_at"]),
                 ),
             )
@@ -2781,6 +4277,7 @@ class AdminPage(tk.Frame):
             self._set_inventory_preview(self._inventory_by_id(first_id))
             return
         self._set_inventory_preview(None)
+
     def _refresh_sales_data(self) -> None:
         self.app.attendance_store.delete_blocked_sales_entries()
         self._refresh_sales_period_values()
@@ -3204,6 +4701,19 @@ class AdminPage(tk.Frame):
             f"Email: {item.get('account_email', '')}",
             f"Password: {item.get('account_password', '')}",
         ]
+        if item.get("item_kind") == "slots":
+            parts.append(
+                f"Slots: {item.get('slots_left', 0)} free of {item.get('total_slots', 0)}"
+            )
+        else:
+            purchase = str(item.get("purchase_date", "")).strip()
+            if purchase:
+                parts.append(
+                    f"Purchased: {self._format_date(purchase)}  ({item.get('valid_days', 30)} days)"
+                )
+                parts.append(
+                    f"Runs out: {self._format_date(item['expiry_date'])}  -  {self._inventory_status_text(item)}"
+                )
         comment = str(item.get("comment", "")).strip()
         if comment:
             parts.extend(["", "Comment:", comment])
@@ -3219,6 +4729,17 @@ class AdminPage(tk.Frame):
         else:
             self.inventory_preview_text.insert("1.0", self._inventory_preview(item))
         self.inventory_preview_text.configure(state="disabled")
+        self._refresh_inventory_slot_uses()
+    def _current_month_shifts(self) -> list[dict]:
+        """Attendance is shown one month at a time - the running total of
+        every shift ever saved says nothing about the current month."""
+        today = date.today()
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        return self.app.attendance_store.list_shift_summaries(
+            start_date=today.replace(day=1).strftime("%Y-%m-%d"),
+            end_date=today.replace(day=last_day).strftime("%Y-%m-%d"),
+        )
+
     def _refresh_metrics(self, shifts: list[dict]) -> None:
         active_count = sum(1 for shift in shifts if shift["status"] == "active")
         breaks = sum(int(shift["break_count"]) for shift in shifts)
@@ -3231,7 +4752,10 @@ class AdminPage(tk.Frame):
     def _refresh_shift_table(self, shifts: list[dict]) -> None:
         for item in self.shifts_tree.get_children():
             self.shifts_tree.delete(item)
-        self.shift_count_label.configure(text=f"{len(shifts)} shift records saved locally")
+        today = date.today()
+        self.shift_count_label.configure(
+            text=f"{calendar.month_name[today.month]} {today.year} | {len(shifts)} shift records"
+        )
         valid_ids = set()
         for index, shift in enumerate(shifts):
             shift_id = str(shift["id"])
@@ -3307,7 +4831,7 @@ class AdminPage(tk.Frame):
             # synced shift would just get silently re-imported and look
             # "active" again on the next cloud sync pull.
             threading.Thread(target=self._delete_shift_from_cloud, args=(cloud_id,), daemon=True).start()
-        shifts = self.app.attendance_store.list_shift_summaries()
+        shifts = self._current_month_shifts()
         self._refresh_metrics(shifts)
         self._refresh_shift_table(shifts)
         self._refresh_event_table(None)

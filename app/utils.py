@@ -161,3 +161,28 @@ def is_timestamp_newer_or_equal(local_value: str, candidate_value: str) -> bool:
     except ValueError:
         return local_value >= candidate_value
 
+
+
+def inventory_status_text(item: dict) -> str:
+    """One short line that means the right thing for either kind of stock.
+
+    A shared account reports free slots; a timed one reports its countdown.
+    Both panels show the identical wording so the admin and the employee are
+    never reading two different stories about the same account.
+    """
+    if item.get("item_kind") == "slots":
+        total = int(item.get("total_slots") or 0)
+        left = int(item.get("slots_left") or 0)
+        if not total:
+            return "no slots set"
+        return "full - no slots left" if left == 0 else f"{left} of {total} slots left"
+    days_left = item.get("days_left")
+    if days_left is None:
+        return "no purchase date"
+    if days_left < 0:
+        return f"expired {abs(days_left)}d ago"
+    if days_left == 0:
+        return "runs out today"
+    if days_left == 1:
+        return "1 day left"
+    return f"{days_left} days left"

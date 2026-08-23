@@ -268,6 +268,7 @@ class CloudSyncService:
                     lambda: self._push_attendance_day_events(client, config.user_sync_secret),
                     lambda: self._push_attendance_events(client, config.user_sync_secret),
                     lambda: self._push_sales_entries(client, config.user_sync_secret),
+                    lambda: self._push_inventory_slot_uses(client, config.user_sync_secret),
                 ])
             if push_local and config.can_push:
                 pushed += self._run_concurrently([
@@ -287,6 +288,7 @@ class CloudSyncService:
                 if config.can_pull_users:
                     jobs.append(lambda: self._pull_employee_users(client, config.user_sync_secret))
                     jobs.append(lambda: self._pull_inventory_items(client, config.user_sync_secret))
+                    jobs.append(lambda: self._pull_inventory_slot_uses(client, config.user_sync_secret))
                     jobs.append(lambda: self._pull_app_settings(client, config.user_sync_secret))
                 if config.can_pull_users and not config.can_push:
                     # Employee PCs (no admin secret): pull sales entries via
@@ -380,6 +382,26 @@ class CloudSyncService:
                 raise
 
         return self._push_rows_concurrently(self.store.list_cloud_pending_inventory_items(limit=200), push_one)
+
+    def _push_inventory_slot_uses(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        """Employee-gated on purpose: the employee is the one seating and
+        correcting clients, and the admin PC holds this secret as well."""
+        def push_one(row: Any) -> None:
+            local_id = int(row["id"])
+            ensured = self.store.ensure_inventory_slot_use_cloud_id(local_id)
+            try:
+                client.rpc(
+                    "dsp_upsert_inventory_slot_use",
+                    {"sync_secret": sync_secret, "row_data": self._inventory_slot_use_payload(ensured)},
+                )
+                self.store.mark_inventory_slot_use_cloud_sync(local_id)
+            except Exception as exc:
+                self.store.mark_inventory_slot_use_cloud_error(local_id, str(exc))
+                raise
+
+        return self._push_rows_concurrently(
+            self.store.list_cloud_pending_inventory_slot_uses(limit=200), push_one
+        )
 
     def _push_app_settings(self, client: SupabaseRestClient, admin_secret: str) -> int:
         def push_one(row: Any) -> None:
@@ -654,6 +676,17 @@ class CloudSyncService:
                 changed += 1
         return changed
 
+    def _pull_inventory_slot_uses(self, client: SupabaseRestClient, sync_secret: str) -> int:
+        rows = self._rpc_delta(
+            client, "inventory_slot_uses", "dsp_list_inventory_slot_uses_delta",
+            "dsp_list_inventory_slot_uses", {"sync_secret": sync_secret},
+        )
+        changed = 0
+        for row in rows:
+            if isinstance(row, dict) and self.store.import_cloud_inventory_slot_use(row):
+                changed += 1
+        return changed
+
     def _pull_app_settings(self, client: SupabaseRestClient, sync_secret: str) -> int:
         rows = self._rpc_delta(
             client, "app_settings", "dsp_list_app_settings_delta", "dsp_list_app_settings",
@@ -735,7 +768,25 @@ class CloudSyncService:
             "account_email": row.get("account_email", ""),
             "account_password": row.get("account_password", ""),
             "comment": row.get("comment", ""),
+            "item_kind": row.get("item_kind", "timed"),
+            "purchase_date": row.get("purchase_date", ""),
+            "valid_days": int(row.get("valid_days") or 30),
+            "total_slots": int(row.get("total_slots") or 0),
             "created_by": row.get("created_by", ""),
+            "created_at": to_cloud_timestamp(row.get("created_at", "")),
+            "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
+            "is_active": bool(row.get("is_active", 1)),
+        }
+
+    def _inventory_slot_use_payload(self, row: dict) -> dict:
+        return {
+            "cloud_id": row.get("cloud_id", ""),
+            "item_cloud_id": row.get("item_cloud_id", ""),
+            "client_email": row.get("client_email", ""),
+            "package": row.get("package", ""),
+            "notes": row.get("notes", ""),
+            "used_by": row.get("used_by", ""),
+            "updated_by": row.get("updated_by", ""),
             "created_at": to_cloud_timestamp(row.get("created_at", "")),
             "updated_at": to_cloud_timestamp(row.get("updated_at") or row.get("created_at", "")),
             "is_active": bool(row.get("is_active", 1)),

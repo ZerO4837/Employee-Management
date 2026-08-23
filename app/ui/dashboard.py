@@ -39,16 +39,26 @@ from app.ui.widgets import (
     MetricCard,
     SurfaceCard,
     add_tooltip,
+    ask_slot_details,
     combo_box,
     field_label,
     make_button,
     make_scrollable_region,
     set_button_enabled,
+    show_app_alert,
     status_pill,
     text_entry,
 )
 from app.storage import EXCEL_SYNC_PENDING_MESSAGE
-from app.utils import duration_label, money_label, now_label, parse_local_datetime, sales_entry_matches_search, today_label
+from app.utils import (
+    duration_label,
+    inventory_status_text,
+    money_label,
+    now_label,
+    parse_local_datetime,
+    sales_entry_matches_search,
+    today_label,
+)
 
 
 def _amount_input_allowed(value: str) -> bool:
@@ -134,6 +144,12 @@ class DashboardPage(tk.Frame):
         self.inventory_detail_meta_label: tk.Label | None = None
         self.inventory_count_label: tk.Label | None = None
         self.inventory_copy_status_label: tk.Label | None = None
+        self.inventory_slot_frame: tk.Frame | None = None
+        self.inventory_slot_tree: ttk.Treeview | None = None
+        self.inventory_slot_title_label: tk.Label | None = None
+        self.inventory_use_slot_button: tk.Button | None = None
+        self.inventory_slot_uses: list[dict] = []
+        self.selected_inventory_slot_id: int | None = None
         self.notes_selected_date = self._sales_date()
         self.daily_note_text: tk.Text | None = None
         self.permanent_note_text: tk.Text | None = None
@@ -905,20 +921,39 @@ class DashboardPage(tk.Frame):
             row=0, column=2, sticky="e", padx=(10, 0)
         )
 
+        inventory_columns = ("service", "email", "status", "updated")
         self.inventory_tree = ttk.Treeview(
             list_body,
-            columns=("service", "email", "updated"),
+            columns=inventory_columns,
             show="headings",
             selectmode="browse",
         )
-        self.inventory_tree.heading("service", text="Service", anchor="w")
-        self.inventory_tree.heading("email", text="Email / Account", anchor="w")
-        self.inventory_tree.heading("updated", text="Updated", anchor="w")
-        self.inventory_tree.column("service", width=220, minwidth=160, anchor="w", stretch=True)
-        self.inventory_tree.column("email", width=240, minwidth=170, anchor="w", stretch=True)
-        self.inventory_tree.column("updated", width=120, minwidth=110, anchor="w", stretch=False)
+        inventory_headings = {
+            "service": "Service",
+            "email": "Email / Account",
+            "status": "Slots / Time Left",
+            "updated": "Updated",
+        }
+        inventory_widths = {"service": 165, "email": 200, "status": 145, "updated": 105}
+        for column in inventory_columns:
+            self.inventory_tree.heading(column, text=inventory_headings[column], anchor="w")
+            self.inventory_tree.column(
+                column,
+                width=inventory_widths[column],
+                minwidth=inventory_widths[column],
+                anchor="w",
+                stretch=column in {"service", "email"},
+            )
         self.inventory_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
         self.inventory_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        # Green while there is time, red in the last 5 days, red block once
+        # it has run out - the same language the admin panel uses.
+        self.inventory_tree.tag_configure("inventory_active", foreground=SUCCESS)
+        self.inventory_tree.tag_configure("inventory_expiring", foreground=DANGER, background="#fff4f5")
+        self.inventory_tree.tag_configure("inventory_expired", foreground=WHITE, background=DANGER)
+        self.inventory_tree.tag_configure("inventory_open", foreground=BLUE)
+        self.inventory_tree.tag_configure("inventory_full", foreground=DANGER, background="#fff4f5")
+        self.inventory_tree.tag_configure("inventory_unknown", foreground=MUTED)
         self.inventory_tree.grid(row=3, column=0, sticky="nsew")
         self.inventory_tree.bind("<<TreeviewSelect>>", self._on_inventory_selected)
 
@@ -977,6 +1012,68 @@ class DashboardPage(tk.Frame):
         )
         self.inventory_copy_status_label = tk.Label(actions, text="", bg=WHITE, fg=SUCCESS, font=(FONT_BOLD, 10))
         self.inventory_copy_status_label.grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+        # Shared accounts only: who already sits on this account, and the
+        # buttons to seat a new client or fix an email.
+        self.inventory_slot_frame = tk.Frame(preview, bg=WHITE)
+        self.inventory_slot_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(18, 0))
+        self.inventory_slot_frame.grid_columnconfigure(0, weight=1)
+        self.inventory_slot_title_label = tk.Label(
+            self.inventory_slot_frame,
+            text="Clients on this account",
+            bg=WHITE,
+            fg=TEXT,
+            font=(FONT_BOLD, 12),
+        )
+        self.inventory_slot_title_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        slot_columns = ("email", "package", "added_by", "added")
+        self.inventory_slot_tree = ttk.Treeview(
+            self.inventory_slot_frame, columns=slot_columns, show="headings", height=5, selectmode="browse"
+        )
+        slot_headings = {
+            "email": "Client Email",
+            "package": "Package",
+            "added_by": "Added By",
+            "added": "Added",
+        }
+        slot_widths = {"email": 250, "package": 110, "added_by": 130, "added": 120}
+        for column in slot_columns:
+            self.inventory_slot_tree.heading(column, text=slot_headings[column], anchor="w")
+            self.inventory_slot_tree.column(
+                column,
+                width=slot_widths[column],
+                minwidth=slot_widths[column],
+                anchor="w",
+                stretch=column == "email",
+            )
+        self.inventory_slot_tree.tag_configure("inventory_even", background=WHITE, foreground=TEXT)
+        self.inventory_slot_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
+        self.inventory_slot_tree.grid(row=1, column=0, sticky="nsew")
+        slot_scroll = ttk.Scrollbar(
+            self.inventory_slot_frame, orient="vertical", command=self.inventory_slot_tree.yview
+        )
+        slot_scroll.grid(row=1, column=1, sticky="ns")
+        self.inventory_slot_tree.configure(yscrollcommand=slot_scroll.set)
+
+        slot_actions = tk.Frame(self.inventory_slot_frame, bg=WHITE)
+        slot_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        slot_actions.grid_columnconfigure(2, weight=1)
+        self.inventory_use_slot_button = make_button(
+            slot_actions, "Use Slot", self.use_inventory_slot, "primary"
+        )
+        self.inventory_use_slot_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        make_button(slot_actions, "Edit Client", self.edit_inventory_slot_use, "light").grid(
+            row=0, column=1, sticky="w"
+        )
+        tk.Label(
+            slot_actions,
+            text="Removing a client is done by the admin.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+        ).grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self.inventory_slot_frame.grid_remove()
         return view
     def _build_sales_view(self) -> tk.Frame:
         view = tk.Frame(self.content, bg=BG)
@@ -1796,6 +1893,7 @@ class DashboardPage(tk.Frame):
             if self.inventory_count_label is not None:
                 self.inventory_count_label.configure(text="Check in to view inventory.")
             self._set_inventory_preview(None)
+            self._refresh_inventory_slot_uses()
             return
         items = self._filtered_inventory_items()
         if self.inventory_count_label is not None:
@@ -1815,15 +1913,15 @@ class DashboardPage(tk.Frame):
             valid_ids.add(item_id)
             if first_id is None:
                 first_id = item_id
-            tag = "inventory_even" if index % 2 == 0 else "inventory_odd"
             self.inventory_tree.insert(
                 "",
                 "end",
                 iid=str(item_id),
-                tags=(tag,),
+                tags=(f"inventory_{item['state']}",),
                 values=(
                     item["service_name"],
                     item["account_email"],
+                    inventory_status_text(item),
                     self._format_short_date(item["updated_at"]),
                 ),
             )
@@ -1838,8 +1936,10 @@ class DashboardPage(tk.Frame):
             self.inventory_tree.selection_set(str(selected))
             self.inventory_tree.focus(str(selected))
             self._set_inventory_preview(self._inventory_item_by_id(selected))
+            self._refresh_inventory_slot_uses()
             return
         self._set_inventory_preview(None)
+        self._refresh_inventory_slot_uses()
 
     def _on_inventory_selected(self, _event: tk.Event) -> None:
         if self.inventory_tree is None:
@@ -1847,6 +1947,7 @@ class DashboardPage(tk.Frame):
         selection = self.inventory_tree.selection()
         self.selected_inventory_id = int(selection[0]) if selection else None
         self._set_inventory_preview(self._inventory_item_by_id(self.selected_inventory_id))
+        self._refresh_inventory_slot_uses()
 
     def _inventory_item_by_id(self, item_id: int | None) -> dict | None:
         if item_id is None:
@@ -1862,10 +1963,133 @@ class DashboardPage(tk.Frame):
             f"Email: {item.get('account_email', '')}",
             f"Password: {item.get('account_password', '')}",
         ]
+        if item.get("item_kind") == "slots":
+            parts.append(
+                f"Slots: {item.get('slots_left', 0)} free of {item.get('total_slots', 0)}"
+            )
+        else:
+            purchase = str(item.get("purchase_date", "")).strip()
+            if purchase:
+                parts.append(f"Purchased: {self._format_short_date(purchase)}")
+                parts.append(f"Runs out: {self._format_short_date(item['expiry_date'])}")
+            parts.append(f"Status: {inventory_status_text(item)}")
         comment = str(item.get("comment", "")).strip()
         if comment:
             parts.extend(["", "Comment:", comment])
         return "\n".join(parts)
+
+    # ----- slots on a shared account ---------------------------------
+    def _refresh_inventory_slot_uses(self) -> None:
+        """Show who is already sitting on the selected shared account, and
+        only offer Use Slot when there is actually a slot free."""
+        if self.inventory_slot_tree is None:
+            return
+        for row in self.inventory_slot_tree.get_children():
+            self.inventory_slot_tree.delete(row)
+        item = self._inventory_item_by_id(self.selected_inventory_id)
+        is_slots = bool(item) and item.get("item_kind") == "slots" and self.checked_in
+        if self.inventory_slot_frame is not None:
+            if is_slots:
+                self.inventory_slot_frame.grid()
+            else:
+                self.inventory_slot_frame.grid_remove()
+        if not is_slots:
+            self.inventory_slot_uses = []
+            self.selected_inventory_slot_id = None
+            return
+        self.inventory_slot_uses = self.app.attendance_store.list_inventory_slot_uses(
+            item_id=int(item["id"]),
+            item_cloud_id=str(item.get("cloud_id", "")),
+        )
+        if self.inventory_slot_title_label is not None:
+            self.inventory_slot_title_label.configure(
+                text=f"Clients on this account  -  {inventory_status_text(item)}"
+            )
+        if self.inventory_use_slot_button is not None:
+            set_button_enabled(self.inventory_use_slot_button, int(item.get("slots_left") or 0) > 0)
+        valid_ids: set[int] = set()
+        for index, use in enumerate(self.inventory_slot_uses):
+            use_id = int(use["id"])
+            valid_ids.add(use_id)
+            self.inventory_slot_tree.insert(
+                "",
+                "end",
+                iid=str(use_id),
+                tags=("inventory_even" if index % 2 == 0 else "inventory_odd",),
+                values=(
+                    use["client_email"] or "-",
+                    use["package"] or "-",
+                    use["used_by"] or "-",
+                    self._format_short_date(use["created_at"]),
+                ),
+            )
+        if self.selected_inventory_slot_id not in valid_ids:
+            self.selected_inventory_slot_id = None
+
+    def _selected_slot_use(self) -> dict | None:
+        selection = self.inventory_slot_tree.selection() if self.inventory_slot_tree else ()
+        if selection:
+            self.selected_inventory_slot_id = int(selection[0])
+        for use in self.inventory_slot_uses:
+            if int(use["id"]) == self.selected_inventory_slot_id:
+                return use
+        return None
+
+    def use_inventory_slot(self) -> None:
+        item = self._inventory_item_by_id(self.selected_inventory_id)
+        if item is None or item.get("item_kind") != "slots":
+            show_app_alert(self, "Not a shared account", "Pick a shared (slots) account first.", "warning")
+            return
+        if int(item.get("slots_left") or 0) <= 0:
+            show_app_alert(self, "No slots left", f"{item['account_email']} is full.", "warning")
+            return
+        details = ask_slot_details(
+            self,
+            "Use a slot",
+            f"{item['service_name']} - {item['account_email']}  "
+            f"({item['slots_left']} of {item['total_slots']} free)",
+        )
+        if details is None:
+            return
+        try:
+            self.app.attendance_store.create_inventory_slot_use(
+                int(item["id"]), details["client_email"], details["package"], "", self.app.display_user
+            )
+        except ValueError as exc:
+            show_app_alert(self, "Slot not saved", str(exc), "warning")
+            return
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(
+            self, "Slot used", f"{details['client_email']} was added to {item['account_email']}.", "success"
+        )
+
+    def edit_inventory_slot_use(self) -> None:
+        use = self._selected_slot_use()
+        if use is None:
+            show_app_alert(self, "No client selected", "Select a client from the list first.", "warning")
+            return
+        details = ask_slot_details(
+            self,
+            "Edit client",
+            "Changed their email? Update it here so the admin sees the latest.",
+            client_email=use["client_email"],
+            package=use["package"],
+            confirm_text="Save Changes",
+        )
+        if details is None:
+            return
+        try:
+            self.app.attendance_store.update_inventory_slot_use(
+                int(use["id"]), details["client_email"], details["package"], use.get("notes", ""),
+                self.app.display_user,
+            )
+        except ValueError as exc:
+            show_app_alert(self, "Not saved", str(exc), "warning")
+            return
+        self._refresh_inventory_items()
+        self.app.request_cloud_sync(push_local=True)
+        show_app_alert(self, "Client updated", f"Now saved as {details['client_email']}.", "success")
 
     def _set_inventory_preview(self, item: dict | None) -> None:
         if (

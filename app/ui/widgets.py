@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import calendar
+from datetime import datetime
 import re
 import tkinter as tk
 from tkinter import font as tkfont, ttk
@@ -286,6 +288,376 @@ def make_button(
         lambda _event: button.configure(bg=button.normal_bg) if str(button["state"]) == "normal" else None,  # type: ignore[attr-defined]
     )
     return button
+
+
+def enable_combo_typeahead(combo: ttk.Combobox, timeout_ms: int = 900) -> None:
+    """Jump straight to a value by typing it.
+
+    Tk's readonly combobox only matches a single character, so a long day
+    or year list still means scrolling. This collects the keys typed in
+    quick succession - "11" jumps to 11 rather than 1 then 1 - and works
+    whether the list is open or the box merely has focus.
+    """
+    state: dict[str, object] = {"buffer": "", "after": None}
+    popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+    listbox = f"{popdown}.f.l"
+
+    def reset() -> None:
+        state["after"] = None
+        state["buffer"] = ""
+
+    def apply(char: str) -> str | None:
+        if not char or not char.isprintable() or char.isspace():
+            return None
+        if state["after"] is not None:
+            try:
+                combo.after_cancel(state["after"])
+            except tk.TclError:
+                pass
+        state["buffer"] = str(state["buffer"]) + char
+        state["after"] = combo.after(timeout_ms, reset)
+
+        buffer = str(state["buffer"]).casefold()
+        values = [str(value) for value in (combo.cget("values") or ())]
+        match = next((value for value in values if value.casefold().startswith(buffer)), None)
+        if match is None and len(buffer) > 1:
+            # The run does not match anything - treat this key as a fresh
+            # start so typing keeps feeling responsive.
+            state["buffer"] = char
+            match = next((value for value in values if value.casefold().startswith(char.casefold())), None)
+        if match is None:
+            return "break"
+        combo.set(match)
+        combo.event_generate("<<ComboboxSelected>>")
+        try:
+            if int(combo.tk.call("winfo", "ismapped", popdown)):
+                index = values.index(match)
+                combo.tk.call(listbox, "selection", "clear", 0, "end")
+                combo.tk.call(listbox, "selection", "set", index)
+                combo.tk.call(listbox, "activate", index)
+                combo.tk.call(listbox, "see", index)
+        except (tk.TclError, ValueError):
+            pass
+        return "break"
+
+    combo.bind("<KeyPress>", lambda event: apply(event.char), add="+")
+    # Typing while the drop-down list is open goes to the list, not the box.
+    combo.tk.call(
+        "bind", listbox, "<KeyPress>", f"{combo.register(lambda char: apply(char))} %A"
+    )
+
+
+class DatePicker(tk.Frame):
+    """Day / Month / Year dropdowns instead of a typed date string.
+
+    Typing "YYYY-MM-DD" is easy to get wrong and needs validation messages;
+    three pickers cannot produce an invalid date, and the day list is
+    trimmed to the chosen month so 31 February is not offerable.
+    """
+
+    MONTHS = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]
+
+    def __init__(self, parent: tk.Misc, bg: str = WHITE, years_back: int = 3, years_ahead: int = 3) -> None:
+        super().__init__(parent, bg=bg)
+        today = datetime.now().date()
+        self.day_var = tk.StringVar(value=str(today.day))
+        self.month_var = tk.StringVar(value=self.MONTHS[today.month - 1])
+        self.year_var = tk.StringVar(value=str(today.year))
+        self.grid_columnconfigure((0, 1, 2), weight=1)
+
+        self.day_combo = ttk.Combobox(
+            self, values=[str(d) for d in range(1, 32)], textvariable=self.day_var,
+            state="readonly", width=4, font=(FONT, 10),
+        )
+        self.day_combo.grid(row=0, column=0, sticky="ew", ipady=3)
+        self.month_combo = ttk.Combobox(
+            self, values=self.MONTHS, textvariable=self.month_var,
+            state="readonly", width=11, font=(FONT, 10),
+        )
+        self.month_combo.grid(row=0, column=1, sticky="ew", padx=6, ipady=3)
+        years = [str(y) for y in range(today.year - years_back, today.year + years_ahead + 1)]
+        self.year_combo = ttk.Combobox(
+            self, values=years, textvariable=self.year_var,
+            state="readonly", width=6, font=(FONT, 10),
+        )
+        self.year_combo.grid(row=0, column=2, sticky="ew", ipady=3)
+
+        for combo in (self.month_combo, self.year_combo):
+            combo.bind("<<ComboboxSelected>>", lambda _event: self._trim_days())
+        # Type "11" to jump to 11, "aug" to jump to August - no scrolling.
+        for combo in (self.day_combo, self.month_combo, self.year_combo):
+            enable_combo_typeahead(combo)
+        self._trim_days()
+
+    def _trim_days(self) -> None:
+        try:
+            month = self.MONTHS.index(self.month_var.get()) + 1
+            year = int(self.year_var.get())
+        except (ValueError, IndexError):
+            return
+        last_day = calendar.monthrange(year, month)[1]
+        self.day_combo.configure(values=[str(d) for d in range(1, last_day + 1)])
+        try:
+            if int(self.day_var.get()) > last_day:
+                self.day_var.set(str(last_day))
+        except ValueError:
+            self.day_var.set("1")
+
+    def get_date(self) -> str:
+        """The chosen date as YYYY-MM-DD, or '' if somehow incomplete."""
+        try:
+            month = self.MONTHS.index(self.month_var.get()) + 1
+            return f"{int(self.year_var.get()):04d}-{month:02d}-{int(self.day_var.get()):02d}"
+        except (ValueError, IndexError):
+            return ""
+
+    def set_date(self, value: str) -> None:
+        text = str(value or "").strip()
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            parsed = datetime.now().date()
+        self.year_var.set(str(parsed.year))
+        self.month_var.set(self.MONTHS[parsed.month - 1])
+        self._trim_days()
+        self.day_var.set(str(parsed.day))
+
+    def set_enabled(self, enabled: bool) -> None:
+        state = "readonly" if enabled else "disabled"
+        for combo in (self.day_combo, self.month_combo, self.year_combo):
+            combo.configure(state=state)
+
+
+class AppDialog(tk.Toplevel):
+    """A modal styled like the rest of the app.
+
+    tkinter's simpledialog/messagebox draw Tk's own feather icon and plain
+    grey chrome, which looks foreign next to these screens. This keeps the
+    app icon, the surface card and the app's buttons.
+    """
+
+    def __init__(self, parent: tk.Misc, title: str, subtitle: str = "", width: int = 420) -> None:
+        super().__init__(parent)
+        self.parent = parent
+        self.result: object | None = None
+        self.title(title)
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent.winfo_toplevel())
+        self._apply_icon()
+        card = SurfaceCard(self, padx=22, pady=20, accent=True, accent_start=BLUE, accent_end=TEAL)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+        self.body = card.body
+        self.body.grid_columnconfigure(0, weight=1)
+        tk.Label(self.body, text=title, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 15)).grid(
+            row=0, column=0, sticky="w"
+        )
+        if subtitle:
+            tk.Label(
+                self.body,
+                text=subtitle,
+                bg=WHITE,
+                fg=MUTED,
+                font=(FONT, 9),
+                wraplength=width - 60,
+                justify="left",
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.content = tk.Frame(self.body, bg=WHITE)
+        self.content.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        self.content.grid_columnconfigure(0, weight=1)
+        self._width = width
+
+    def _apply_icon(self) -> None:
+        try:
+            toplevel = self.parent.winfo_toplevel()
+            icon = toplevel.iconbitmap()
+            if icon:
+                self.iconbitmap(icon)
+        except tk.TclError:
+            pass
+
+    def add_buttons(self, confirm_text: str, on_confirm, row: int) -> None:
+        actions = tk.Frame(self.body, bg=WHITE)
+        actions.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        actions.grid_columnconfigure((0, 1), weight=1)
+        make_button(actions, confirm_text, on_confirm, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        make_button(actions, "Cancel", self._cancel, "light").grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+    def show(self) -> object | None:
+        """Centre on the parent, grab focus, and block until closed."""
+        self.update_idletasks()
+        top = self.parent.winfo_toplevel()
+        width = max(self.winfo_reqwidth(), self._width)
+        height = self.winfo_reqheight()
+        x = top.winfo_rootx() + max((top.winfo_width() - width) // 2, 0)
+        y = top.winfo_rooty() + max((top.winfo_height() - height) // 3, 0)
+        x = max(0, min(x, self.winfo_screenwidth() - width))
+        y = max(0, min(y, self.winfo_screenheight() - height - 50))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.grab_set()
+        self.wait_window()
+        return self.result
+
+
+def ask_app_text(
+    parent: tk.Misc,
+    title: str,
+    label: str,
+    initial: str = "",
+    subtitle: str = "",
+    confirm_text: str = "Save",
+) -> str | None:
+    """Styled replacement for simpledialog.askstring."""
+    dialog = AppDialog(parent, title, subtitle)
+    variable = tk.StringVar(value=initial)
+    tk.Label(dialog.content, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+        row=0, column=0, sticky="w"
+    )
+    entry = tk.Entry(
+        dialog.content,
+        textvariable=variable,
+        bg="#f8fbff",
+        fg=TEXT,
+        relief="flat",
+        highlightthickness=1,
+        highlightbackground=LINE,
+        highlightcolor=BLUE,
+        font=(FONT, 11),
+    )
+    entry.grid(row=1, column=0, sticky="ew", ipady=8, pady=(8, 0))
+    entry.focus_set()
+    entry.select_range(0, "end")
+
+    def confirm() -> None:
+        dialog.result = variable.get().strip()
+        dialog.destroy()
+
+    dialog.add_buttons(confirm_text, confirm, row=3)
+    entry.bind("<Return>", lambda _event: confirm())
+    return dialog.show()
+
+
+def ask_app_choice(
+    parent: tk.Misc,
+    title: str,
+    label: str,
+    options: list[str],
+    subtitle: str = "",
+    confirm_text: str = "Confirm",
+) -> str | None:
+    """Styled single-choice picker - one button per option, no typing."""
+    dialog = AppDialog(parent, title, subtitle)
+    chosen = tk.StringVar(value=options[0] if options else "")
+    tk.Label(dialog.content, text=label, bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+        row=0, column=0, sticky="w", pady=(0, 8)
+    )
+    buttons: dict[str, tk.Button] = {}
+
+    def select(option: str) -> None:
+        chosen.set(option)
+        for name, button in buttons.items():
+            active = name == option
+            button.normal_bg = BLUE if active else "#eaf2ff"
+            button.enabled_fg = WHITE if active else BLUE_DARK
+            button.configure(
+                bg=button.normal_bg,
+                fg=button.enabled_fg,
+                activeforeground=button.enabled_fg,
+            )
+
+    row_frame = tk.Frame(dialog.content, bg=WHITE)
+    row_frame.grid(row=1, column=0, sticky="ew")
+    for index, option in enumerate(options):
+        row_frame.grid_columnconfigure(index, weight=1, uniform="choice")
+        button = make_button(row_frame, option, lambda o=option: select(o), "light")
+        button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
+        buttons[option] = button
+    if options:
+        select(options[0])
+
+    def confirm() -> None:
+        dialog.result = chosen.get()
+        dialog.destroy()
+
+    dialog.add_buttons(confirm_text, confirm, row=3)
+    return dialog.show()
+
+
+SLOT_PACKAGES = ("1 Month", "3 Months", "6 Months", "1 Year")
+
+
+def ask_slot_details(
+    parent: tk.Misc,
+    title: str,
+    subtitle: str = "",
+    client_email: str = "",
+    package: str = "",
+    confirm_text: str = "Save",
+) -> dict | None:
+    """Ask for the client email and package when a slot is taken or edited.
+
+    Returns {"client_email": ..., "package": ...}, or None if cancelled.
+    The same dialog serves both the employee taking a slot and either side
+    correcting the email later.
+    """
+    dialog = AppDialog(parent, title, subtitle, width=460)
+    email_var = tk.StringVar(value=client_email)
+    package_var = tk.StringVar(value=package or SLOT_PACKAGES[0])
+    error_label = tk.Label(dialog.content, text="", bg=WHITE, fg=DANGER, font=(FONT, 9), anchor="w")
+
+    tk.Label(dialog.content, text="Client Email", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+        row=0, column=0, sticky="w"
+    )
+    entry = tk.Entry(
+        dialog.content,
+        textvariable=email_var,
+        bg="#f8fbff",
+        fg=TEXT,
+        relief="flat",
+        highlightthickness=1,
+        highlightbackground=LINE,
+        highlightcolor=BLUE,
+        font=(FONT, 11),
+    )
+    entry.grid(row=1, column=0, sticky="ew", ipady=8, pady=(8, 14))
+    entry.focus_set()
+    entry.select_range(0, "end")
+
+    tk.Label(dialog.content, text="Package", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+        row=2, column=0, sticky="w"
+    )
+    package_combo = ttk.Combobox(
+        dialog.content,
+        values=list(SLOT_PACKAGES),
+        textvariable=package_var,
+        state="readonly",
+        font=(FONT, 10),
+    )
+    package_combo.grid(row=3, column=0, sticky="ew", ipady=5, pady=(8, 0))
+    enable_combo_typeahead(package_combo)
+    error_label.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+
+    def confirm() -> None:
+        email = email_var.get().strip()
+        if not email:
+            error_label.configure(text="Enter the client email before saving.")
+            entry.focus_set()
+            return
+        dialog.result = {"client_email": email, "package": package_var.get().strip()}
+        dialog.destroy()
+
+    dialog.add_buttons(confirm_text, confirm, row=3)
+    entry.bind("<Return>", lambda _event: confirm())
+    return dialog.show()
 
 
 def add_tooltip(widget: tk.Widget, text_provider) -> None:
