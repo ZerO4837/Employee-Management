@@ -1119,6 +1119,31 @@ def configure_treeview(style: ttk.Style) -> None:
     )
 
 
+def disable_combobox_mousewheel(widget: tk.Misc) -> None:
+    """Stop the mouse wheel from silently changing a dropdown's value.
+
+    Tk binds <MouseWheel> on the combobox *class* to ttk::combobox::Scroll,
+    so scrolling a page while the pointer happens to pass over a dropdown
+    cycles its selection - one notch is one value. On a long form that
+    reads as the field "changing by itself", and on the sold-item dropdown
+    it could change what was recorded as sold without anyone touching it.
+
+    The replacement returns None rather than "break", so the page-scroll
+    binding further down the chain still runs and the wheel scrolls the
+    page as expected. Opening the dropdown and scrolling the list still
+    works - that is the popdown listbox, not this binding.
+
+    Call once against any widget; class bindings are application-wide.
+    """
+    for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        widget.bind_class("TCombobox", sequence, lambda _event: None)
+
+
+# Widgets that scroll themselves: Tk gives each of these its own class-level
+# <MouseWheel> binding, which runs before the page-level one.
+SELF_SCROLLING_WIDGETS = (ttk.Treeview, tk.Text, tk.Listbox, tk.Canvas)
+
+
 def bind_mousewheel_scroll(canvas: tk.Canvas) -> None:
     """Scroll `canvas` with the mouse wheel, but only while the pointer is over it."""
 
@@ -1130,15 +1155,45 @@ def bind_mousewheel_scroll(canvas: tk.Canvas) -> None:
         first, last = canvas.yview()
         return first > 0.0 or last < 1.0
 
+    def _inner_scroller(widget: tk.Misc | None) -> tk.Misc | None:
+        """The self-scrolling widget under the pointer, if there is one.
+
+        Walks up from the widget the event landed on, stopping at our own
+        canvas so the page itself never counts as its own inner list.
+        """
+        while widget is not None and widget is not canvas:
+            if isinstance(widget, SELF_SCROLLING_WIDGETS):
+                return widget
+            widget = getattr(widget, "master", None)
+        return None
+
+    def _owned_by_inner(event: tk.Event) -> bool:
+        """True when a list under the pointer has its own overflow.
+
+        Tk already scrolled it via its class binding by the time we run, so
+        all we must do is not *also* scroll the page underneath it - that
+        double handling is what made one notch over an account list jump the
+        whole page. A list short enough to need no scrolling hands the wheel
+        back to the page.
+        """
+        inner = _inner_scroller(getattr(event, "widget", None))
+        if inner is None:
+            return False
+        try:
+            first, last = inner.yview()
+        except (tk.TclError, ValueError, TypeError):
+            return False
+        return float(first) > 0.0 or float(last) < 1.0
+
     def _on_mousewheel(event: tk.Event) -> None:
-        if not _can_scroll():
+        if _owned_by_inner(event) or not _can_scroll():
             return
         delta = event.delta
         steps = -1 * (delta // 120) if abs(delta) >= 120 else -1 * delta
         canvas.yview_scroll(int(steps), "units")
 
     def _on_mousewheel_linux(event: tk.Event) -> None:
-        if not _can_scroll():
+        if _owned_by_inner(event) or not _can_scroll():
             return
         canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 

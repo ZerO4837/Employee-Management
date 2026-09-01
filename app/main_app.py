@@ -37,7 +37,7 @@ from app.ui.admin import AdminPage
 from app.ui.dashboard import DashboardPage
 from app.ui.login import LoginPage
 from app.ui.reset_password import ResetPasswordPage
-from app.ui.widgets import configure_treeview
+from app.ui.widgets import configure_treeview, disable_combobox_mousewheel
 
 
 def _enable_windows_dpi_awareness() -> None:
@@ -120,6 +120,9 @@ class EmployeeApp(tk.Tk):
         except tk.TclError:
             pass
         configure_treeview(style)
+        # Application-wide: the wheel scrolls the page, it never edits a
+        # dropdown. Tk's default does both at once.
+        disable_combobox_mousewheel(self)
 
     def _set_window_icon(self) -> None:
         icon_set = False

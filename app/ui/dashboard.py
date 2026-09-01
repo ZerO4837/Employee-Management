@@ -107,9 +107,9 @@ class DashboardPage(tk.Frame):
         "today": "▤",
     }
     SALES_VISIBLE_DAYS = 10
-    # Ten day cards side by side would be too narrow to read, so they wrap
-    # onto a second row.
-    SALES_DAY_CARDS_PER_ROW = 5
+    # All ten day chips sit in one row. They are small on purpose: the tall
+    # two-row cards they replaced pushed the entries table off screen.
+    SALES_DAY_CARDS_PER_ROW = SALES_VISIBLE_DAYS
 
     def __init__(self, parent: tk.Misc, app) -> None:
         super().__init__(parent, bg=BG)
@@ -886,9 +886,16 @@ class DashboardPage(tk.Frame):
 
         workspace = tk.Frame(view, bg=BG)
         workspace.grid(row=1, column=0, sticky="nsew")
-        workspace.grid_columnconfigure(0, weight=2)
-        workspace.grid_columnconfigure(1, weight=3)
-        workspace.grid_rowconfigure(0, weight=1)
+        # The list carries four columns of real text; the detail panel holds
+        # eight short lines. Weighting them the other way round left every
+        # service name and email clipped mid-word.
+        workspace.grid_columnconfigure(0, weight=3)
+        workspace.grid_columnconfigure(1, weight=2)
+        # Row 1 is the client table for shared accounts. It runs the full
+        # width of the screen rather than being squeezed into the narrow
+        # detail column, and collapses to nothing when it is not needed.
+        workspace.grid_rowconfigure(0, weight=3)
+        workspace.grid_rowconfigure(1, weight=2)
 
         list_card = SurfaceCard(workspace, padx=20, pady=18, accent=True, accent_start=BLUE, accent_end=TEAL)
         list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
@@ -934,13 +941,16 @@ class DashboardPage(tk.Frame):
             "status": "Slots / Time Left",
             "updated": "Updated",
         }
-        inventory_widths = {"service": 165, "email": 200, "status": 145, "updated": 105}
+        # width is the comfortable size, minwidth how far it may compress on
+        # a small window - keeping them equal is what made the text clip.
+        inventory_widths = {"service": 205, "email": 250, "status": 135, "updated": 105}
+        inventory_minwidths = {"service": 130, "email": 150, "status": 110, "updated": 85}
         for column in inventory_columns:
             self.inventory_tree.heading(column, text=inventory_headings[column], anchor="w")
             self.inventory_tree.column(
                 column,
                 width=inventory_widths[column],
-                minwidth=inventory_widths[column],
+                minwidth=inventory_minwidths[column],
                 anchor="w",
                 stretch=column in {"service", "email"},
             )
@@ -959,7 +969,13 @@ class DashboardPage(tk.Frame):
 
         list_scroll = ttk.Scrollbar(list_body, orient="vertical", command=self.inventory_tree.yview)
         list_scroll.grid(row=3, column=1, sticky="ns")
-        self.inventory_tree.configure(yscrollcommand=list_scroll.set)
+        # A sideways scrollbar so a narrow window hides nothing - without it
+        # Tk simply cuts the last columns off with no way to reach them.
+        list_hscroll = ttk.Scrollbar(list_body, orient="horizontal", command=self.inventory_tree.xview)
+        list_hscroll.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        self.inventory_tree.configure(
+            yscrollcommand=list_scroll.set, xscrollcommand=list_hscroll.set
+        )
 
         preview_card = SurfaceCard(workspace, padx=22, pady=20, accent=True, accent_start=SUCCESS, accent_end=TEAL)
         preview_card.grid(row=0, column=1, sticky="nsew")
@@ -982,6 +998,11 @@ class DashboardPage(tk.Frame):
 
         self.inventory_preview_text = tk.Text(
             preview,
+            height=9,
+            # A Text defaults to demanding 80 characters of width, and grid
+            # honours that request before it ever looks at column weights -
+            # which is what kept starving the list beside it.
+            width=1,
             bg="#fbfdff",
             fg=TEXT,
             relief="flat",
@@ -1014,12 +1035,16 @@ class DashboardPage(tk.Frame):
         self.inventory_copy_status_label.grid(row=0, column=3, sticky="w", padx=(12, 0))
 
         # Shared accounts only: who already sits on this account, and the
-        # buttons to seat a new client or fix an email.
-        self.inventory_slot_frame = tk.Frame(preview, bg=WHITE)
-        self.inventory_slot_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(18, 0))
-        self.inventory_slot_frame.grid_columnconfigure(0, weight=1)
+        # buttons to seat a new client or fix an email. Full width, because
+        # four columns of client detail do not fit beside the list.
+        slot_card = SurfaceCard(workspace, padx=20, pady=16, accent=True, accent_start=TEAL, accent_end=SUCCESS)
+        slot_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
+        self.inventory_slot_frame = slot_card
+        slot_body = slot_card.body
+        slot_body.grid_columnconfigure(0, weight=1)
+        slot_body.grid_rowconfigure(1, weight=1)
         self.inventory_slot_title_label = tk.Label(
-            self.inventory_slot_frame,
+            slot_body,
             text="Clients on this account",
             bg=WHITE,
             fg=TEXT,
@@ -1029,7 +1054,7 @@ class DashboardPage(tk.Frame):
 
         slot_columns = ("email", "package", "added_by", "added")
         self.inventory_slot_tree = ttk.Treeview(
-            self.inventory_slot_frame, columns=slot_columns, show="headings", height=5, selectmode="browse"
+            slot_body, columns=slot_columns, show="headings", height=5, selectmode="browse"
         )
         slot_headings = {
             "email": "Client Email",
@@ -1037,13 +1062,14 @@ class DashboardPage(tk.Frame):
             "added_by": "Added By",
             "added": "Added",
         }
-        slot_widths = {"email": 250, "package": 110, "added_by": 130, "added": 120}
+        slot_widths = {"email": 320, "package": 140, "added_by": 170, "added": 150}
+        slot_minwidths = {"email": 180, "package": 100, "added_by": 110, "added": 100}
         for column in slot_columns:
             self.inventory_slot_tree.heading(column, text=slot_headings[column], anchor="w")
             self.inventory_slot_tree.column(
                 column,
                 width=slot_widths[column],
-                minwidth=slot_widths[column],
+                minwidth=slot_minwidths[column],
                 anchor="w",
                 stretch=column == "email",
             )
@@ -1051,12 +1077,12 @@ class DashboardPage(tk.Frame):
         self.inventory_slot_tree.tag_configure("inventory_odd", background="#f8fbff", foreground=TEXT)
         self.inventory_slot_tree.grid(row=1, column=0, sticky="nsew")
         slot_scroll = ttk.Scrollbar(
-            self.inventory_slot_frame, orient="vertical", command=self.inventory_slot_tree.yview
+            slot_body, orient="vertical", command=self.inventory_slot_tree.yview
         )
         slot_scroll.grid(row=1, column=1, sticky="ns")
         self.inventory_slot_tree.configure(yscrollcommand=slot_scroll.set)
 
-        slot_actions = tk.Frame(self.inventory_slot_frame, bg=WHITE)
+        slot_actions = tk.Frame(slot_body, bg=WHITE)
         slot_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         slot_actions.grid_columnconfigure(2, weight=1)
         self.inventory_use_slot_button = make_button(
@@ -1203,9 +1229,12 @@ class DashboardPage(tk.Frame):
         today_add_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
         self.shift_required_buttons.append(today_add_button)
 
+        # A single compact row of day chips. The old layout was ten tall
+        # cards over two rows - roughly 220px of screen before the table
+        # even started, so the entries needed scrolling to reach.
         days = tk.Frame(view, bg=BG)
-        days.grid(row=1, column=0, sticky="ew", pady=(0, 16))
-        for column in range(self.SALES_DAY_CARDS_PER_ROW):
+        days.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        for column in range(self.SALES_VISIBLE_DAYS):
             days.grid_columnconfigure(column, weight=1, uniform="sales_day")
         for index in range(self.SALES_VISIBLE_DAYS):
             self._build_sales_day_card(days, index)
@@ -1307,43 +1336,35 @@ class DashboardPage(tk.Frame):
         return view
 
     def _build_sales_day_card(self, parent: tk.Misc, index: int) -> None:
+        """One day chip: the date on top, its entry count under it.
+
+        Deliberately small - ten of these sit in a single row about 46px
+        tall, where the old cards took two rows of roughly 110px each.
+        """
         card = tk.Frame(
             parent,
             bg=WHITE,
-            padx=14,
-            pady=12,
+            padx=6,
+            pady=5,
             highlightbackground=LINE,
             highlightthickness=1,
             cursor="hand2",
         )
-        card_row = index // self.SALES_DAY_CARDS_PER_ROW
-        card_column = index % self.SALES_DAY_CARDS_PER_ROW
-        card.grid(
-            row=card_row,
-            column=card_column,
-            sticky="ew",
-            padx=(0 if card_column == 0 else 8, 0),
-            pady=(0 if card_row == 0 else 8, 0),
-        )
+        card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
         card.grid_columnconfigure(0, weight=1)
-        label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=(FONT_BOLD, 9), cursor="hand2")
-        label.grid(row=0, column=0, sticky="w")
-        date_label = tk.Label(card, text="", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 12), cursor="hand2")
-        date_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        count_label = tk.Label(card, text="", bg=WHITE, fg=BLUE, font=(FONT_BOLD, 10), cursor="hand2")
-        count_label.grid(row=2, column=0, sticky="w", pady=(10, 0))
-        status_label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=(FONT, 9), cursor="hand2")
-        status_label.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        date_label = tk.Label(card, text="", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10), cursor="hand2")
+        date_label.grid(row=0, column=0, sticky="ew")
+        count_label = tk.Label(card, text="", bg=WHITE, fg=BLUE, font=(FONT_BOLD, 9), cursor="hand2")
+        count_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         slot = {
             "card": card,
-            "label": label,
             "date": date_label,
             "count": count_label,
-            "status": status_label,
         }
         self.sales_day_card_slots.append(slot)
         for widget in slot.values():
             widget.bind("<Button-1>", lambda _event, slot_index=index: self._select_sales_day_slot(slot_index))
+        add_tooltip(card, lambda i=index: self._sales_day_tooltip(i))
 
     def _sales_field(
         self,
@@ -2153,24 +2174,45 @@ class DashboardPage(tk.Frame):
             messagebox.showinfo("No inventory selected", "Select an inventory item first.")
             return
         self._copy_inventory_value(self._inventory_detail_text(item), "Details")
+    def _sales_day_tooltip(self, index: int) -> str:
+        visible_dates = self._sales_visible_dates()
+        if index >= len(visible_dates):
+            return ""
+        entry_date = visible_dates[index]
+        count = len(self._sales_entries_for_date(entry_date))
+        return f"{self._sales_day_title(entry_date)} - {self._entry_count_text(count)}"
+
+    def _sales_chip_date_text(self, entry_date: str) -> str:
+        """Short enough for ten chips in one row: "Today", or "26 Aug"."""
+        label = self._sales_day_label(entry_date)
+        if label in {"Today", "Yesterday"}:
+            return label
+        try:
+            return datetime.strptime(entry_date, "%Y-%m-%d").strftime("%d %b")
+        except ValueError:
+            return entry_date
+
     def _refresh_sales_day_cards(self) -> None:
         visible_dates = self._sales_visible_dates()
         for index, slot in enumerate(self.sales_day_card_slots):
             if index >= len(visible_dates):
                 continue
             entry_date = visible_dates[index]
-            day_entries = self._sales_entries_for_date(entry_date)
+            count = len(self._sales_entries_for_date(entry_date))
             selected = entry_date == self.sales_selected_date
-            card_bg = "#eaf2ff" if selected else WHITE
+            card_bg = BLUE if selected else WHITE
             border = BLUE if selected else LINE
-            title_fg = BLUE_DARK if selected else TEXT
-            muted_fg = BLUE_DARK if selected else MUTED
-            count_fg = BLUE if selected else NAVY
+            date_fg = WHITE if selected else TEXT
+            # An empty day is greyed out so the days with work stand out.
+            if selected:
+                count_fg = WHITE
+            elif count:
+                count_fg = BLUE
+            else:
+                count_fg = MUTED
             slot["card"].configure(bg=card_bg, highlightbackground=border)
-            slot["label"].configure(text=self._sales_day_label(entry_date), bg=card_bg, fg=muted_fg)
-            slot["date"].configure(text=self._sales_day_title(entry_date), bg=card_bg, fg=title_fg)
-            slot["count"].configure(text=self._entry_count_text(len(day_entries)), bg=card_bg, fg=count_fg)
-            slot["status"].configure(text="Selected" if selected else "", bg=card_bg, fg=SUCCESS)
+            slot["date"].configure(text=self._sales_chip_date_text(entry_date), bg=card_bg, fg=date_fg)
+            slot["count"].configure(text=str(count), bg=card_bg, fg=count_fg)
 
     def _refresh_selected_sales_day_header(self) -> None:
         selected_entries = self._sales_entries_for_date(self.sales_selected_date)

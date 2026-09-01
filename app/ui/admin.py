@@ -76,6 +76,12 @@ INVENTORY_KIND_HINTS = {
 }
 INVENTORY_LABEL_TO_KIND = {label: kind for kind, label in INVENTORY_KIND_LABELS.items()}
 
+# How many days the admin's default Sales Data window covers. The label is
+# built from this number rather than typed out, so the caption can never
+# again claim one span while the table shows another.
+SALES_DEFAULT_WINDOW_DAYS = 30
+SALES_DEFAULT_PERIOD = f"Last {SALES_DEFAULT_WINDOW_DAYS} Days"
+
 
 class AdminPage(tk.Frame):
     def __init__(self, parent: tk.Misc, app) -> None:
@@ -185,7 +191,7 @@ class AdminPage(tk.Frame):
         self.cloud_sync_status_label: tk.Label | None = None
         self.excel_path_var = tk.StringVar()
         self.excel_sheet_var = tk.StringVar()
-        self.sales_period_var = tk.StringVar(value="Last 5 Days")
+        self.sales_period_var = tk.StringVar(value=SALES_DEFAULT_PERIOD)
         self.sales_search_var = tk.StringVar()
         self.admin_sales_entries: list[dict] = []
         self.admin_excel_sync_results: queue.Queue[tuple[dict, ExcelSyncResult]] = queue.Queue()
@@ -1269,13 +1275,14 @@ class AdminPage(tk.Frame):
             "status": "Slots / Time Left",
             "updated": "Updated",
         }
-        inventory_widths = {"service": 165, "email": 215, "type": 85, "status": 145, "updated": 110}
+        inventory_widths = {"service": 175, "email": 225, "type": 80, "status": 140, "updated": 105}
+        inventory_minwidths = {"service": 120, "email": 145, "type": 65, "status": 110, "updated": 85}
         for column in inventory_columns:
             self.inventory_tree.heading(column, text=inventory_headings[column], anchor="w")
             self.inventory_tree.column(
                 column,
                 width=inventory_widths[column],
-                minwidth=inventory_widths[column],
+                minwidth=inventory_minwidths[column],
                 anchor="w",
                 stretch=column in {"service", "email"},
             )
@@ -1293,6 +1300,9 @@ class AdminPage(tk.Frame):
         inventory_scroll = ttk.Scrollbar(body, orient="vertical", command=self.inventory_tree.yview)
         inventory_scroll.grid(row=1, column=1, sticky="ns")
         self.inventory_tree.configure(yscrollcommand=inventory_scroll.set)
+        inventory_hscroll = ttk.Scrollbar(body, orient="horizontal", command=self.inventory_tree.xview)
+        inventory_hscroll.grid(row=8, column=0, sticky="ew", pady=(4, 0))
+        self.inventory_tree.configure(xscrollcommand=inventory_hscroll.set)
 
         list_actions = tk.Frame(body, bg=WHITE)
         list_actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -1452,16 +1462,23 @@ class AdminPage(tk.Frame):
             "left": "Days Left",
             "clients": "Clients",
         }
+        # A real password like "Hosting@123@321" needs ~125px; the old 105
+        # clipped it straight into the Client Number column beside it.
+        # width is the comfortable size, minwidth how far it may compress.
         account_widths = {
-            "email": 170, "password": 105, "number": 125, "package": 80,
-            "sold": 95, "expiry": 95, "left": 100, "clients": 60,
+            "email": 180, "password": 145, "number": 120, "package": 78,
+            "sold": 92, "expiry": 92, "left": 98, "clients": 52,
+        }
+        account_minwidths = {
+            "email": 130, "password": 115, "number": 95, "package": 68,
+            "sold": 80, "expiry": 80, "left": 85, "clients": 45,
         }
         for column in account_columns:
             self.renewal_accounts_tree.heading(column, text=account_headings[column], anchor="w")
             self.renewal_accounts_tree.column(
                 column,
                 width=account_widths[column],
-                minwidth=account_widths[column],
+                minwidth=account_minwidths[column],
                 anchor="w",
                 stretch=column == "email",
             )
@@ -1476,10 +1493,18 @@ class AdminPage(tk.Frame):
         self.renewal_accounts_tree.bind("<<TreeviewSelect>>", self._on_renewal_account_selected)
         accounts_scroll = ttk.Scrollbar(accounts_body, orient="vertical", command=self.renewal_accounts_tree.yview)
         accounts_scroll.grid(row=2, column=1, sticky="ns")
-        self.renewal_accounts_tree.configure(yscrollcommand=accounts_scroll.set)
+        # Sideways scrollbar so a narrow window hides nothing: ttk clips the
+        # trailing columns rather than shrinking them.
+        accounts_hscroll = ttk.Scrollbar(
+            accounts_body, orient="horizontal", command=self.renewal_accounts_tree.xview
+        )
+        accounts_hscroll.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        self.renewal_accounts_tree.configure(
+            yscrollcommand=accounts_scroll.set, xscrollcommand=accounts_hscroll.set
+        )
 
         account_form = tk.Frame(accounts_body, bg=WHITE)
-        account_form.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        account_form.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         account_form.grid_columnconfigure((0, 1), weight=1)
         self._renewal_entry(account_form, "Account Email", self.renewal_email_var, 0, 0)
         self._renewal_entry(account_form, "Password", self.renewal_password_var, 0, 1)
@@ -1563,13 +1588,14 @@ class AdminPage(tk.Frame):
             "expiry": "Expires",
             "left": "Days Left",
         }
-        client_widths = {"number": 150, "email": 210, "package": 100, "purchase": 115, "expiry": 115, "left": 115}
+        client_widths = {"number": 145, "email": 205, "package": 95, "purchase": 105, "expiry": 105, "left": 108}
+        client_minwidths = {"number": 110, "email": 140, "package": 75, "purchase": 88, "expiry": 88, "left": 90}
         for column in client_columns:
             self.renewal_clients_tree.heading(column, text=client_headings[column], anchor="w")
             self.renewal_clients_tree.column(
                 column,
                 width=client_widths[column],
-                minwidth=client_widths[column],
+                minwidth=client_minwidths[column],
                 anchor="w",
                 stretch=column in {"number", "email"},
             )
@@ -1583,10 +1609,16 @@ class AdminPage(tk.Frame):
         self.renewal_clients_tree.bind("<<TreeviewSelect>>", self._on_renewal_client_selected)
         clients_scroll = ttk.Scrollbar(clients_body, orient="vertical", command=self.renewal_clients_tree.yview)
         clients_scroll.grid(row=1, column=1, sticky="ns")
-        self.renewal_clients_tree.configure(yscrollcommand=clients_scroll.set)
+        clients_hscroll = ttk.Scrollbar(
+            clients_body, orient="horizontal", command=self.renewal_clients_tree.xview
+        )
+        clients_hscroll.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.renewal_clients_tree.configure(
+            yscrollcommand=clients_scroll.set, xscrollcommand=clients_hscroll.set
+        )
 
         client_form = tk.Frame(clients_body, bg=WHITE)
-        client_form.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        client_form.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         client_form.grid_columnconfigure((0, 1, 2), weight=1)
         self._renewal_entry(client_form, "Client Number", self.client_number_var, 0, 0)
         self._renewal_entry(client_form, "Client Email (optional)", self.client_email_var, 0, 1)
@@ -1703,12 +1735,16 @@ class AdminPage(tk.Frame):
             "kind": 75, "number": 135, "email": 175, "service": 110, "account": 195,
             "package": 85, "expiry": 100, "left": 105, "status": 175,
         }
+        minwidths = {
+            "kind": 60, "number": 105, "email": 130, "service": 85, "account": 140,
+            "package": 70, "expiry": 85, "left": 88, "status": 130,
+        }
         for column in columns:
             self.renewal_reminders_tree.heading(column, text=headings[column], anchor="w")
             self.renewal_reminders_tree.column(
                 column,
                 width=widths[column],
-                minwidth=widths[column],
+                minwidth=minwidths[column],
                 anchor="w",
                 stretch=column in {"email", "account"},
             )
@@ -1921,7 +1957,7 @@ class AdminPage(tk.Frame):
         metrics = tk.Frame(parent, bg=BG)
         metrics.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="sales_data_metrics")
-        self.sales_entries_card = MetricCard(metrics, "Sales Entries", "0", BLUE, "Last 5 days")
+        self.sales_entries_card = MetricCard(metrics, "Sales Entries", "0", BLUE, SALES_DEFAULT_PERIOD)
         self.sales_entries_card.grid(row=0, column=0, sticky="ew", padx=(0, 9))
         self.sales_total_card = MetricCard(metrics, "Total Selling", "0", SUCCESS, "Visible entries")
         self.sales_total_card.grid(row=0, column=1, sticky="ew", padx=3)
@@ -4283,21 +4319,11 @@ class AdminPage(tk.Frame):
         self._refresh_sales_period_values()
         start_date, end_date, period_label = self._selected_sales_period_range()
         search_query = self.sales_search_var.get().strip()
-        search_month_label = ""
-        if search_query:
-            # Searching covers one whole calendar month: the month the
-            # selected period ends in. So the default "Last 5 Days" searches
-            # all of August without ever spilling into July, a single-day
-            # selection searches that day's month, and deliberately picking
-            # "June Sales" searches June.
-            try:
-                anchor = datetime.strptime(end_date, "%Y-%m-%d").date()
-            except ValueError:
-                anchor = date.today()
-            last_day = calendar.monthrange(anchor.year, anchor.month)[1]
-            start_date = anchor.replace(day=1).strftime("%Y-%m-%d")
-            end_date = anchor.replace(day=last_day).strftime("%Y-%m-%d")
-            search_month_label = f"{calendar.month_name[anchor.month]} {anchor.year}"
+        # Searching filters the window on screen; it never changes it. The
+        # default is a full 30 days, so a search finds what it used to find
+        # when this silently widened itself to the month - except now the
+        # caption and the table always agree.
+        window_label = period_label
         entries = self.app.attendance_store.list_sales_entries_between(start_date, end_date)
         if search_query:
             entries = [entry for entry in entries if sales_entry_matches_search(entry, search_query)]
@@ -4310,8 +4336,11 @@ class AdminPage(tk.Frame):
         self.sales_total_card.value_label.configure(text=money_label(str(total_selling)))
         self.sales_profit_card.value_label.configure(text=money_label(str(total_profit)))
         self.sales_retry_card.value_label.configure(text=str(retry_count))
+        # The card used to be hard-coded to "Last 5 days" while a search
+        # quietly showed a whole month underneath it.
+        self.sales_entries_card.helper_label.configure(text=window_label)
         if search_query:
-            summary = f"Search '{search_query}' in {search_month_label} | {len(entries)} entries"
+            summary = f"Search '{search_query}' in {window_label} | {len(entries)} entries"
         else:
             summary = f"{period_label} | {self._sales_window_label(start_date, end_date)} | {len(entries)} entries"
         self.sales_data_summary_label.configure(text=summary)
@@ -4353,13 +4382,13 @@ class AdminPage(tk.Frame):
         today = date.today()
         day_options = [(today - timedelta(days=offset)).strftime("%d %b %Y") for offset in range(30)]
         month_options = [f"{calendar.month_name[month]} Sales" for month in range(1, today.month + 1)]
-        return ["Last 5 Days", *day_options, *month_options]
+        return [SALES_DEFAULT_PERIOD, *day_options, *month_options]
 
     def _selected_sales_period_range(self) -> tuple[str, str, str]:
         selection = self.sales_period_var.get()
-        if selection == "Last 5 Days":
+        if selection == SALES_DEFAULT_PERIOD:
             start_date, end_date = self._sales_visible_date_range()
-            return start_date, end_date, "Last 5 Days"
+            return start_date, end_date, SALES_DEFAULT_PERIOD
 
         if not selection.endswith(" Sales"):
             try:
@@ -4383,7 +4412,7 @@ class AdminPage(tk.Frame):
 
     def _sales_visible_date_range(self) -> tuple[str, str]:
         today = datetime.now().date()
-        start = today - timedelta(days=4)
+        start = today - timedelta(days=SALES_DEFAULT_WINDOW_DAYS - 1)
         return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
     def _sales_window_label(self, start_date: str, end_date: str) -> str:
