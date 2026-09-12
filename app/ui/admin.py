@@ -158,6 +158,13 @@ class AdminPage(tk.Frame):
         self.renewal_clients: list[dict] = []
         self.renewal_service_buttons: dict[int, tk.Button] = {}
         self.renewal_service_bar: tk.Frame | None = None
+        self.renewal_search_var = tk.StringVar()
+        self.renewal_search_entry: tk.Entry | None = None
+        self.renewal_search_results_frame: tk.Frame | None = None
+        self.renewal_search_tree: ttk.Treeview | None = None
+        self.renewal_search_summary: tk.Label | None = None
+        self.renewal_search_hint: tk.Label | None = None
+        self.renewal_search_results: list[dict] = []
         self.renewal_accounts_tree: ttk.Treeview | None = None
         self.renewal_clients_tree: ttk.Treeview | None = None
         self.renewal_reminders_tree: ttk.Treeview | None = None
@@ -1424,8 +1431,101 @@ class AdminPage(tk.Frame):
         make_button(header, "Delete Service", self.delete_renewal_service, "danger").grid(
             row=0, column=3, rowspan=2, sticky="e"
         )
+        # Search sits above the service buttons: finding one email by
+        # clicking through every service and account does not scale.
+        search_row = tk.Frame(services_body, bg=WHITE)
+        search_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 12))
+        search_row.grid_columnconfigure(1, weight=1)
+        tk.Label(search_row, text="Search", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
+        )
+        self.renewal_search_entry = tk.Entry(
+            search_row,
+            textvariable=self.renewal_search_var,
+            bg="#f8fbff",
+            fg=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=BLUE,
+            font=(FONT, 11),
+        )
+        self.renewal_search_entry.grid(row=0, column=1, sticky="ew", ipady=7)
+        self.renewal_search_entry.bind("<Return>", lambda _event: self.open_first_renewal_search_result())
+        self.renewal_search_entry.bind("<Escape>", lambda _event: self.clear_renewal_search())
+        self.renewal_search_entry.bind("<Down>", lambda _event: self._focus_renewal_search_results())
+        make_button(search_row, "Clear", self.clear_renewal_search, "light").grid(
+            row=0, column=2, sticky="e", padx=(8, 0)
+        )
+        self.renewal_search_hint = tk.Label(
+            search_row,
+            text="Select a service to search its accounts and clients.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+        )
+        self.renewal_search_hint.grid(row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        self.renewal_search_var.trace_add("write", lambda *_: self._refresh_renewal_search())
+
         self.renewal_service_bar = tk.Frame(services_body, bg=WHITE)
-        self.renewal_service_bar.grid(row=1, column=0, columnspan=4, sticky="ew")
+        self.renewal_service_bar.grid(row=2, column=0, columnspan=4, sticky="ew")
+
+        # Results only take up room while there is something to show.
+        self.renewal_search_results_frame = tk.Frame(services_body, bg=WHITE)
+        self.renewal_search_results_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        self.renewal_search_results_frame.grid_columnconfigure(0, weight=1)
+        self.renewal_search_summary = tk.Label(
+            self.renewal_search_results_frame, text="", bg=WHITE, fg=TEXT, font=(FONT_BOLD, 11), anchor="w"
+        )
+        self.renewal_search_summary.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        search_columns = ("kind", "account", "number", "email", "left")
+        self.renewal_search_tree = ttk.Treeview(
+            self.renewal_search_results_frame,
+            columns=search_columns,
+            show="headings",
+            height=6,
+            selectmode="browse",
+        )
+        search_headings = {
+            "kind": "Type",
+            "account": "Account Email",
+            "number": "Client Number",
+            "email": "Client Email",
+            "left": "Days Left",
+        }
+        search_widths = {"kind": 80, "account": 260, "number": 150, "email": 260, "left": 110}
+        search_minwidths = {"kind": 65, "account": 160, "number": 110, "email": 160, "left": 90}
+        for column in search_columns:
+            self.renewal_search_tree.heading(column, text=search_headings[column], anchor="w")
+            self.renewal_search_tree.column(
+                column,
+                width=search_widths[column],
+                minwidth=search_minwidths[column],
+                anchor="w",
+                stretch=column in {"account", "email"},
+            )
+        self.renewal_search_tree.tag_configure("client_active", foreground=SUCCESS)
+        self.renewal_search_tree.tag_configure("client_expiring", foreground=DANGER, background="#fff4f5")
+        self.renewal_search_tree.tag_configure("client_expired", foreground=WHITE, background=DANGER)
+        self.renewal_search_tree.tag_configure("client_in_stock", foreground=BLUE, background="#f2f7ff")
+        self.renewal_search_tree.tag_configure("client_unknown", foreground=TEXT)
+        self.renewal_search_tree.grid(row=1, column=0, sticky="ew")
+        search_scroll = ttk.Scrollbar(
+            self.renewal_search_results_frame, orient="vertical", command=self.renewal_search_tree.yview
+        )
+        search_scroll.grid(row=1, column=1, sticky="ns")
+        self.renewal_search_tree.configure(yscrollcommand=search_scroll.set)
+        # A single click opens it - the whole point is fewer clicks.
+        self.renewal_search_tree.bind("<<TreeviewSelect>>", lambda _event: self._open_selected_renewal_search_result())
+        self.renewal_search_tree.bind("<Return>", lambda _event: self._open_selected_renewal_search_result())
+        tk.Label(
+            self.renewal_search_results_frame,
+            text="Click a result to open its account, with the match selected.",
+            bg=WHITE,
+            fg=MUTED,
+            font=(FONT, 9),
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.renewal_search_results_frame.grid_remove()
 
         # --- Accounts of the selected service, and their clients ---
         detail = tk.Frame(parent, bg=BG)
@@ -3396,6 +3496,9 @@ class AdminPage(tk.Frame):
         self._refresh_renewal_clients()
         self._refresh_renewal_reminders()
         self._refresh_renewal_metrics()
+        # Last, so it searches the service that is now selected - switching
+        # from Canva to Adobe with a query typed re-runs it inside Adobe.
+        self._refresh_renewal_search()
 
     def _refresh_renewal_metrics(self) -> None:
         if self.renewal_services_card is None:
@@ -3450,6 +3553,131 @@ class AdminPage(tk.Frame):
             )
             self.renewal_service_bar.grid_columnconfigure(index % per_row, weight=1, uniform="renewal_service")
             self.renewal_service_buttons[service_id] = button
+
+    # ----- search across all services -----------------------------------
+    def _refresh_renewal_search(self) -> None:
+        if self.renewal_search_tree is None or self.renewal_search_results_frame is None:
+            return
+        service = self._selected_service()
+        service_name = service["name"] if service else ""
+        if self.renewal_search_hint is not None:
+            self.renewal_search_hint.configure(
+                text=(
+                    f"Searches {service_name} only - any account or client email, "
+                    "or a phone number in any format."
+                )
+                if service
+                else "Select a service to search its accounts and clients."
+            )
+        query = self.renewal_search_var.get().strip()
+        for row in self.renewal_search_tree.get_children():
+            self.renewal_search_tree.delete(row)
+        if not query:
+            self.renewal_search_results = []
+            self.renewal_search_results_frame.grid_remove()
+            return
+        self.renewal_search_results_frame.grid()
+        if service is None:
+            self.renewal_search_results = []
+            self.renewal_search_summary.configure(text="Add or select a service first.", fg=MUTED)
+            return
+        # Only the open service - searching inside Canva returns Canva's
+        # accounts and clients, nothing from Adobe or Spotify.
+        self.renewal_search_results = self.app.attendance_store.search_renewals(
+            query, service_id=int(service["id"])
+        )
+        count = len(self.renewal_search_results)
+        if not count:
+            self.renewal_search_summary.configure(
+                text=f"Nothing in {service_name} matches '{query}'", fg=MUTED
+            )
+            return
+        clients = sum(1 for r in self.renewal_search_results if r["kind"] == "client")
+        accounts = count - clients
+        parts = []
+        if clients:
+            parts.append(f"{clients} client{'s' if clients != 1 else ''}")
+        if accounts:
+            parts.append(f"{accounts} account{'s' if accounts != 1 else ''}")
+        self.renewal_search_summary.configure(
+            text=f"{' and '.join(parts)} in {service_name} matching '{query}'", fg=TEXT
+        )
+        for index, record in enumerate(self.renewal_search_results):
+            is_client = record["kind"] == "client"
+            self.renewal_search_tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                tags=(f"client_{record.get('state', 'unknown')}",),
+                values=(
+                    "Client" if is_client else "Account",
+                    record.get("account_email") or "-",
+                    record.get("client_number") or "-",
+                    (record.get("client_email") if is_client else "") or "-",
+                    self._client_days_text(record),
+                ),
+            )
+
+    def clear_renewal_search(self) -> None:
+        self.renewal_search_var.set("")
+        if self.renewal_search_entry is not None:
+            self.renewal_search_entry.focus_set()
+
+    def _focus_renewal_search_results(self) -> None:
+        tree = self.renewal_search_tree
+        if tree is None or not tree.get_children():
+            return
+        first = tree.get_children()[0]
+        tree.focus_set()
+        tree.focus(first)
+
+    def open_first_renewal_search_result(self) -> None:
+        if self.renewal_search_results:
+            self.open_renewal_search_result(self.renewal_search_results[0])
+
+    def _open_selected_renewal_search_result(self) -> None:
+        tree = self.renewal_search_tree
+        if tree is None:
+            return
+        selection = tree.selection()
+        if not selection:
+            return
+        try:
+            record = self.renewal_search_results[int(selection[0])]
+        except (ValueError, IndexError):
+            return
+        self.open_renewal_search_result(record)
+
+    def open_renewal_search_result(self, record: dict) -> None:
+        """Take the admin straight to a match: its service, its account and,
+        for a client, the client itself - selected, scrolled into view and
+        loaded into the form ready to edit or renew."""
+        service_id = int(record.get("service_id") or 0)
+        account_id = int(record.get("account_id") or 0)
+        if not service_id or not account_id:
+            return
+        if service_id != self.selected_renewal_service_id:
+            # Results always come from the open service; a stale one from
+            # before a service switch is simply ignored.
+            return
+        self.selected_renewal_account_id = account_id
+        self.selected_renewal_client_id = None
+
+        accounts = self.renewal_accounts_tree
+        if accounts is not None and accounts.exists(str(account_id)):
+            accounts.selection_set(str(account_id))
+            accounts.focus(str(account_id))
+            accounts.see(str(account_id))
+            self._on_renewal_account_selected(None)
+
+        if record.get("kind") == "client":
+            client_id = str(int(record["id"]))
+            clients = self.renewal_clients_tree
+            if clients is not None and clients.exists(client_id):
+                clients.selection_set(client_id)
+                clients.focus(client_id)
+                clients.see(client_id)
+                self._on_renewal_client_selected(None)
 
     def select_renewal_service(self, service_id: int) -> None:
         self.selected_renewal_service_id = int(service_id)

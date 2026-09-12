@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 
@@ -186,3 +187,41 @@ def inventory_status_text(item: dict) -> str:
     if days_left == 1:
         return "1 day left"
     return f"{days_left} days left"
+
+
+def _phone_core(text: str) -> str:
+    """The digits of a number with the country/trunk prefix removed, so the
+    same phone matches however it was typed: "92 334 2460674",
+    "0334-2460674" and "3342460674" all become "3342460674". Short
+    fragments are left alone - stripping a leading 0 from "0674" would stop
+    it matching anything."""
+    digits = re.sub(r"\D", "", str(text or ""))
+    if len(digits) >= 11 and digits.startswith("92"):
+        digits = digits[2:]
+    if len(digits) >= 10 and digits.startswith("0"):
+        digits = digits[1:]
+    return digits
+
+
+def text_or_phone_matches(values, query: str) -> bool:
+    """True if any value contains the query as text, or - when the query
+    looks like part of a phone number - as digits, ignoring spaces, dashes
+    and the 92 / 0 prefix."""
+    needle = (query or "").strip().casefold()
+    if not needle:
+        return False
+    needle_digits = _phone_core(needle)
+    # Only treat it as a number search when it is mostly digits; an email
+    # like "ali92@mail.com" must not match every number containing 92.
+    raw_digits = re.sub(r"\D", "", needle)
+    compact = re.sub(r"[\s+()-]", "", needle)
+    digit_search = len(needle_digits) >= 3 and len(raw_digits) >= len(compact) - 1
+    for value in values:
+        text = str(value or "")
+        if not text:
+            continue
+        if needle in text.casefold():
+            return True
+        if digit_search and needle_digits in _phone_core(text):
+            return True
+    return False

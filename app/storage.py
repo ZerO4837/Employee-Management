@@ -3296,6 +3296,47 @@ class AttendanceStore:
         reminders.sort(key=lambda record: record["days_left"])
         return reminders
 
+    def search_renewals(self, query: str, service_id: int | None = None, limit: int = 60) -> list[dict]:
+        """Find accounts and clients by email or number within one service.
+
+        The admin searches the service they have open - searching inside
+        Canva returns only Canva's accounts and clients. Accounts match on
+        their own email and client number; clients on their own email and
+        number only, so a client is not listed just because its account's
+        email matched.
+        """
+        from app.utils import text_or_phone_matches
+
+        if not str(query or "").strip():
+            return []
+        results: list[dict] = []
+        for account in self.list_renewal_accounts(service_id=service_id):
+            if text_or_phone_matches(
+                (account.get("account_email"), account.get("client_number")),
+                query,
+            ):
+                record = dict(account)
+                record["kind"] = "account"
+                record["account_id"] = int(account["id"])
+                results.append(record)
+        for client in self.list_renewal_clients(service_id=service_id):
+            if text_or_phone_matches((client.get("client_email"), client.get("client_number")), query):
+                record = dict(client)
+                record["kind"] = "client"
+                record["account_id"] = int(client["account_id"])
+                results.append(record)
+        # Clients first - they are what is hardest to find by clicking - then
+        # by service and email so the list reads predictably.
+        results.sort(
+            key=lambda r: (
+                0 if r["kind"] == "client" else 1,
+                str(r.get("service_name", "")).casefold(),
+                str(r.get("account_email", "")).casefold(),
+                str(r.get("client_email", "") or r.get("client_number", "")).casefold(),
+            )
+        )
+        return results[:limit]
+
     def renewal_counts(self) -> dict[str, int]:
         clients = self.list_renewal_clients(active_only=True)
         accounts = self.list_renewal_accounts()
