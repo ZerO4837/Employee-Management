@@ -126,9 +126,15 @@ class CloudSyncService:
     # updated_at it has seen per stream (a machine-local setting) and asks
     # only for rows changed after it.
 
+    # The cursor key changed when we moved from the row's own updated_at to
+    # the server's cloud_updated_at. The new key starts empty on every PC,
+    # which forces one full pull - and that pull is also what recovers any
+    # rows the old event-time cursor skipped.
+    CURSOR_SETTING_PREFIX = "delta_cursor_"
+
     def _delta_since(self, stream: str) -> str:
         try:
-            raw = self.store.get_setting(f"delta_watermark_{stream}", "")
+            raw = self.store.get_setting(f"{self.CURSOR_SETTING_PREFIX}{stream}", "")
         except Exception:
             return ""
         if not raw or is_future_timestamp(raw):
@@ -147,7 +153,11 @@ class CloudSyncService:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            raw = str(row.get("updated_at") or "")
+            # cloud_updated_at is stamped by the database when the row is
+            # written, so a device that was offline for hours still gets its
+            # backlog seen. Fall back to updated_at only when the cursor SQL
+            # has not been applied yet.
+            raw = str(row.get("cloud_updated_at") or row.get("updated_at") or "")
             if not raw:
                 continue
             try:
@@ -160,7 +170,7 @@ class CloudSyncService:
         if not newest_raw:
             return
         try:
-            stored = self.store.get_setting(f"delta_watermark_{stream}", "")
+            stored = self.store.get_setting(f"{self.CURSOR_SETTING_PREFIX}{stream}", "")
             if stored:
                 stored_moment = datetime.fromisoformat(stored.replace("Z", "+00:00"))
                 if not is_future_timestamp(stored) and stored_moment >= newest:
@@ -168,7 +178,7 @@ class CloudSyncService:
         except Exception:
             pass
         try:
-            self.store.set_setting(f"delta_watermark_{stream}", newest_raw)
+            self.store.set_setting(f"{self.CURSOR_SETTING_PREFIX}{stream}", newest_raw)
         except Exception:
             pass
 
@@ -189,10 +199,24 @@ class CloudSyncService:
         return rows
 
     def _select_delta(self, client: SupabaseRestClient, stream: str, table: str, params: dict[str, str]) -> list:
+        """Same cursor rule as the RPC pulls, over a PostgREST table select.
+
+        Filters on the server-stamped cloud_updated_at so a row that reaches
+        the cloud late is still seen. If that column is missing (cursor SQL
+        not applied yet) PostgREST rejects the filter, so fall back to the
+        old updated_at behaviour rather than failing the sync.
+        """
         since = self._delta_since(stream)
-        if since:
-            params = dict(params, updated_at=f"gt.{since}")
-        rows = client.select(table, params)
+        if not since:
+            rows = client.select(table, params)
+            self._advance_delta(stream, rows)
+            return rows
+        try:
+            rows = client.select(table, dict(params, cloud_updated_at=f"gt.{since}"))
+        except Exception as exc:
+            if "cloud_updated_at" not in str(exc):
+                raise
+            rows = client.select(table, dict(params, updated_at=f"gt.{since}"))
         self._advance_delta(stream, rows)
         return rows
 

@@ -298,9 +298,7 @@ def enable_combo_typeahead(combo: ttk.Combobox, timeout_ms: int = 900) -> None:
     quick succession - "11" jumps to 11 rather than 1 then 1 - and works
     whether the list is open or the box merely has focus.
     """
-    state: dict[str, object] = {"buffer": "", "after": None}
-    popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
-    listbox = f"{popdown}.f.l"
+    state: dict[str, object] = {"buffer": "", "after": None, "listbox": ""}
 
     def reset() -> None:
         state["after"] = None
@@ -329,22 +327,45 @@ def enable_combo_typeahead(combo: ttk.Combobox, timeout_ms: int = 900) -> None:
             return "break"
         combo.set(match)
         combo.event_generate("<<ComboboxSelected>>")
-        try:
-            if int(combo.tk.call("winfo", "ismapped", popdown)):
+        listbox = str(state["listbox"])
+        if listbox:
+            try:
                 index = values.index(match)
                 combo.tk.call(listbox, "selection", "clear", 0, "end")
                 combo.tk.call(listbox, "selection", "set", index)
                 combo.tk.call(listbox, "activate", index)
                 combo.tk.call(listbox, "see", index)
-        except (tk.TclError, ValueError):
-            pass
+            except (tk.TclError, ValueError):
+                pass
         return "break"
 
+    def attach_listbox(_event: tk.Event | None = None) -> None:
+        """Bind the open drop-down list, the first time one is opened.
+
+        ttk::combobox::PopdownWindow CREATES the popdown, and every popdown
+        is an always-on-top tool window. Calling it up front gave the app a
+        dozen hidden topmost windows the moment it started, which is not
+        something stock Tk ever does - it builds the popdown only when a
+        drop-down is first opened. So we wait for that too.
+        """
+        if state["listbox"]:
+            return
+        try:
+            popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+            listbox = f"{popdown}.f.l"
+            combo.tk.call("winfo", "exists", listbox)
+            combo.tk.call(
+                "bind", listbox, "<KeyPress>", f"{combo.register(lambda char: apply(char))} %A"
+            )
+        except tk.TclError:
+            return
+        state["listbox"] = listbox
+
     combo.bind("<KeyPress>", lambda event: apply(event.char), add="+")
-    # Typing while the drop-down list is open goes to the list, not the box.
-    combo.tk.call(
-        "bind", listbox, "<KeyPress>", f"{combo.register(lambda char: apply(char))} %A"
-    )
+    # Typing while the drop-down list is open goes to the list, not the box,
+    # so that needs its own binding - attached lazily on first open.
+    combo.bind("<Button-1>", lambda _event: combo.after_idle(attach_listbox), add="+")
+    combo.bind("<Down>", lambda _event: combo.after_idle(attach_listbox), add="+")
 
 
 class DatePicker(tk.Frame):
@@ -592,6 +613,49 @@ def ask_app_choice(
     return dialog.show()
 
 
+def ask_app_confirm(
+    parent: tk.Misc,
+    title: str,
+    message: str,
+    confirm_text: str = "Discard",
+    cancel_text: str = "Keep Editing",
+    danger: bool = True,
+) -> bool:
+    """Styled yes/no confirmation. True when the user picks the confirm side.
+
+    Cancel is the primary, deliberately: these appear when work is about to
+    be thrown away, so the safe choice should be the easy one. Escape and
+    the window's close button both mean "cancel".
+    """
+    dialog = AppDialog(parent, title, "", width=480)
+    tk.Label(
+        dialog.content,
+        text=message,
+        bg=WHITE,
+        fg=TEXT,
+        font=(FONT, 10),
+        wraplength=420,
+        justify="left",
+    ).grid(row=0, column=0, sticky="w")
+
+    def confirm() -> None:
+        dialog.result = True
+        dialog.destroy()
+
+    actions = tk.Frame(dialog.body, bg=WHITE)
+    actions.grid(row=3, column=0, sticky="ew", pady=(18, 0))
+    actions.grid_columnconfigure((0, 1), weight=1)
+    make_button(actions, cancel_text, dialog._cancel, "primary").grid(
+        row=0, column=0, sticky="ew", padx=(0, 6)
+    )
+    make_button(actions, confirm_text, confirm, "danger" if danger else "light").grid(
+        row=0, column=1, sticky="ew", padx=(6, 0)
+    )
+    dialog.bind("<Escape>", lambda _event: dialog._cancel())
+    dialog.protocol("WM_DELETE_WINDOW", dialog._cancel)
+    return bool(dialog.show())
+
+
 SLOT_PACKAGES = ("1 Month", "3 Months", "6 Months", "1 Year")
 
 
@@ -720,6 +784,14 @@ def add_tooltip(widget: tk.Widget, text_provider) -> None:
     widget.bind("<Enter>", _schedule, add="+")
     widget.bind("<Leave>", _hide, add="+")
     widget.bind("<ButtonPress>", _hide, add="+")
+    # A tooltip is an always-on-top window. If the user switches to another
+    # application while one is showing, <Leave> may never arrive - so drop it
+    # when the window loses focus rather than leaving it floating over
+    # whatever they switched to.
+    try:
+        widget.winfo_toplevel().bind("<FocusOut>", _hide, add="+")
+    except tk.TclError:
+        pass
 
 
 def set_button_enabled(button: tk.Button, enabled: bool) -> None:
@@ -869,6 +941,33 @@ def combo_box(
     return combo
 
 
+def _rest_popdown_topmost(combo: ttk.Combobox, popdown: str) -> None:
+    """Keep a closed drop-down list out of the always-on-top layer.
+
+    Tk creates every combobox popdown as an always-on-top tool window, and
+    the searchable dropdowns have to create theirs up front to bind to it.
+    Left alone that means the app owns hidden topmost windows from the
+    moment it starts, which can leave other applications opening behind it.
+    Tk sets -topmost again itself when the list is actually posted, so
+    clearing it while closed costs nothing.
+    """
+    def clear() -> None:
+        try:
+            if not int(combo.tk.call("winfo", "ismapped", popdown)):
+                combo.tk.call("wm", "attributes", popdown, "-topmost", 0)
+        except tk.TclError:
+            pass
+
+    clear()
+    try:
+        combo.tk.call(
+            "bind", popdown, "<Unmap>",
+            "+" + str(combo.register(lambda: combo.after_idle(clear))),
+        )
+    except tk.TclError:
+        pass
+
+
 def _fit_combo_popdown(combo: ttk.Combobox) -> None:
     """Widen the dropdown list to fully show the longest value.
 
@@ -879,6 +978,7 @@ def _fit_combo_popdown(combo: ttk.Combobox) -> None:
     widened to fit the longest current value.
     """
     popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+    _rest_popdown_topmost(combo, popdown)
 
     def _widen() -> None:
         try:
@@ -921,6 +1021,7 @@ def _enable_combo_search(combo: ttk.Combobox) -> None:
     as the new full list automatically.
     """
     popdown = str(combo.tk.call("ttk::combobox::PopdownWindow", combo))
+    _rest_popdown_topmost(combo, popdown)
     popdown_listbox = f"{popdown}.f.l"
     state: dict[str, list[str] | None] = {
         "full": [str(value) for value in (combo.cget("values") or ())],

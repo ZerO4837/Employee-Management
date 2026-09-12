@@ -39,6 +39,7 @@ from app.ui.widgets import (
     MetricCard,
     SurfaceCard,
     add_tooltip,
+    ask_app_confirm,
     ask_slot_details,
     combo_box,
     field_label,
@@ -1281,7 +1282,7 @@ class DashboardPage(tk.Frame):
             font=(FONT, 10),
         )
         search_entry.pack(side="left", ipady=5)
-        self.sales_search_var.trace_add("write", lambda *_args: self._refresh_today_table())
+        self.sales_search_var.trace_add("write", lambda *_args: self._refresh_sales_day_view())
 
         columns = ("id", "time", "customer", "item", "email_order", "buying", "selling", "status", "note")
         self.today_tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
@@ -2216,7 +2217,19 @@ class DashboardPage(tk.Frame):
 
     def _refresh_selected_sales_day_header(self) -> None:
         selected_entries = self._sales_entries_for_date(self.sales_selected_date)
+        query = self.sales_search_var.get().strip()
         self.selected_day_title_label.configure(text=self._sales_day_title(self.sales_selected_date))
+        if query:
+            found = [e for e in selected_entries if sales_entry_matches_search(e, query)]
+            elsewhere = sum(
+                1 for e in self.sales_entries
+                if e.get("date") != self.sales_selected_date and sales_entry_matches_search(e, query)
+            )
+            text = f"{self._entry_count_text(len(found))} matching '{query}' on this date"
+            if elsewhere:
+                text += f"  -  {elsewhere} more on other dates, pick that date above"
+            self.selected_day_meta_label.configure(text=text)
+            return
         self.selected_day_meta_label.configure(
             text=f"{self._entry_count_text(len(selected_entries))} saved for this date"
         )
@@ -2341,6 +2354,14 @@ class DashboardPage(tk.Frame):
         if name in self.SHIFT_LOCKED_VIEWS and not self.checked_in:
             messagebox.showwarning("Check in required", "Please check in before using this function.")
             name = "overview"
+        # Leaving the sold-item form throws away whatever is typed in it, so
+        # check before that happens rather than after.
+        if (
+            self.current_view == "sales"
+            and name != "sales"
+            and not self._confirm_leaving_unsaved_entry()
+        ):
+            return
         for view in self.views.values():
             view.grid_remove()
         self.views[name].grid(row=0, column=0, sticky="nsew")
@@ -2542,23 +2563,23 @@ class DashboardPage(tk.Frame):
                 ),
             )
 
+    def _refresh_sales_day_view(self) -> None:
+        """Table and header together - they describe the same thing."""
+        self._refresh_selected_sales_day_header()
+        self._refresh_today_table()
+
     def _refresh_today_table(self) -> None:
         for item in self.today_tree.get_children():
             self.today_tree.delete(item)
         query = self.sales_search_var.get().strip()
+        # Searching filters the day you are looking at - it does not quietly
+        # widen to all ten. Pick another chip to search another day.
+        entries = self._sales_entries_for_date(self.sales_selected_date)
         if query:
-            # Searching spans EVERY day in the 5-day view, not just the
-            # selected card - an account email or phone number is worth
-            # finding whichever day it was sold on. The date is shown
-            # alongside the time so the result is still unambiguous.
-            entries = [entry for entry in self.sales_entries if sales_entry_matches_search(entry, query)]
-        else:
-            entries = self._sales_entries_for_date(self.sales_selected_date)
+            entries = [entry for entry in entries if sales_entry_matches_search(entry, query)]
         for index, entry in enumerate(entries):
             tag = "entry_even" if index % 2 == 0 else "entry_odd"
             time_text = entry["time"]
-            if query:
-                time_text = f"{self._sales_short_date(entry.get('date', ''))} {time_text}"
             self.today_tree.insert(
                 "",
                 "end",
@@ -2837,6 +2858,44 @@ class DashboardPage(tk.Frame):
         if self.current_view in self.SHIFT_LOCKED_VIEWS:
             self.show_view("overview")
 
+    # Fields that mean the employee has actually started typing an entry.
+    # The dropdowns are deliberately excluded: they always hold some value,
+    # so treating them as "work in progress" would nag on every visit.
+    SALES_TYPED_FIELDS = ("customer", "order_id", "selling_amount")
+
+    def sales_form_has_unsaved_entry(self) -> bool:
+        """True when the form holds typed content that was never submitted."""
+        for key in self.SALES_TYPED_FIELDS:
+            variable = self.sales_vars.get(key)
+            if variable is not None and variable.get().strip():
+                return True
+        buying = self.sales_vars.get("buying_amount")
+        if buying is not None and buying.get().strip() not in ("", "0"):
+            return True
+        return bool(self.item_other_var.get().strip() or self.status_other_var.get().strip())
+
+    def _confirm_leaving_unsaved_entry(self) -> bool:
+        """Ask before navigating away from a half-typed entry.
+
+        Returns True if it is fine to leave. Answering "keep editing" stays
+        on the form with everything still filled in.
+        """
+        if not self.sales_form_has_unsaved_entry():
+            return True
+        customer = ""
+        variable = self.sales_vars.get("customer")
+        if variable is not None:
+            customer = variable.get().strip()
+        subject = f"the entry for {customer}" if customer else "this entry"
+        return ask_app_confirm(
+            self,
+            "Entry not saved",
+            f"You have started {subject} but have not pressed Enter Data yet.\n\n"
+            "Leaving this screen now will clear what you typed.",
+            confirm_text="Leave and Discard",
+            cancel_text="Keep Editing",
+        )
+
     def clear_sales_form(self) -> None:
         # Full reset: the service dropdown goes back to the first catalog
         # item and the Other Service Name box empties. (This used to keep
@@ -2959,6 +3018,34 @@ class EditEntryWindow(tk.Toplevel):
         self._build()
         self._configure_window_geometry()
         self._center_on_parent()
+        # Everything the form holds the moment it opens. Closing is only
+        # allowed to discard silently while it still matches this.
+        self._opened_with = self._form_snapshot()
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<Escape>", lambda _event: self.close())
+
+    def _form_snapshot(self) -> dict[str, str]:
+        snapshot = {key: variable.get().strip() for key, variable in self.vars.items()}
+        snapshot["__item_other"] = self.item_other_var.get().strip()
+        snapshot["__status_other"] = self.status_other_var.get().strip()
+        return snapshot
+
+    def has_unsaved_changes(self) -> bool:
+        return self._form_snapshot() != self._opened_with
+
+    def close(self) -> None:
+        """Close, but never throw away edits without asking first."""
+        if self.has_unsaved_changes():
+            if not ask_app_confirm(
+                self,
+                "Changes not saved",
+                f"You have changed entry #{self.display_number} but have not pressed Save.\n\n"
+                "Closing now will discard those changes.",
+                confirm_text="Close and Discard",
+                cancel_text="Keep Editing",
+            ):
+                return
+        self.destroy()
 
     def _set_window_icon(self) -> None:
         logo = self.dashboard.app.get_logo((96, 96))
@@ -3027,7 +3114,7 @@ class EditEntryWindow(tk.Toplevel):
         actions.grid(row=1, column=0, sticky="ew", pady=(10, 22))
         actions.grid_columnconfigure((0, 1), weight=1)
         make_button(actions, "Save Changes", self.save, "primary").grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        make_button(actions, "Cancel", self.destroy, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        make_button(actions, "Cancel", self.close, "light").grid(row=0, column=1, sticky="ew", padx=(8, 0))
         self.actions_frame = actions
 
     def _field(
